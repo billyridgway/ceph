@@ -84,8 +84,9 @@ Configuration
    }
 
 ``endpoint`` and ``pep_endpoint`` must be ``https://`` URLs. Timeouts must be
-1 to 60 seconds. ``tls_ca_bundle`` holds PEM text and needs libcurl 7.77 or
-newer. Set either ``service_credential`` or ``service_credential_file``. If the
+1 to 60 seconds. ``tls_ca_bundle`` holds PEM text and replaces the system trust store for
+the service calls. Leave it empty for a service with a publicly trusted
+certificate. With libcurl older than 7.77 it needs the OpenSSL backend. Set either ``service_credential`` or ``service_credential_file``. If the
 file is set it is read on use and wins, so the key can be provisioned per site
 and rotated without a config change. A site that needs a different key from
 the replicated one sets its own file path locally.
