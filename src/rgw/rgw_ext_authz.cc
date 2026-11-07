@@ -60,8 +60,11 @@ void RGWExtAuthzConfig::decode_json(JSONObj* obj)
                            service_credential_file, obj);
   JSONDecoder::decode_json("service_instance", service_instance, obj);
   JSONDecoder::decode_json("tls_ca_bundle", tls_ca_bundle, obj);
-  JSONDecoder::decode_json("connect_timeout_secs", connect_timeout_secs, obj);
-  JSONDecoder::decode_json("request_timeout_secs", request_timeout_secs, obj);
+  // absent timeouts fall back to the defaults
+  JSONDecoder::decode_json("connect_timeout_secs", connect_timeout_secs,
+                           default_connect_timeout_secs, obj);
+  JSONDecoder::decode_json("request_timeout_secs", request_timeout_secs,
+                           default_request_timeout_secs, obj);
   JSONDecoder::decode_json("readonly_role_name", readonly_role_name, obj);
   JSONDecoder::decode_json("readwrite_role_name", readwrite_role_name, obj);
   // absent actions fall back to the defaults

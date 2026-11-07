@@ -403,6 +403,19 @@ TEST(ExtAuthzConfig, ActionsEncodeDecodeAndDefaults)
   EXPECT_EQ(RGWExtAuthzConfig::default_action_assume_role, e.action_assume_role);
 }
 
+TEST(ExtAuthzConfig, JsonWithoutTimeoutsKeepsDefaults)
+{
+  const std::string j = R"({"enabled":true,"provider":"ibm-iam"})";
+  JSONParser p;
+  ASSERT_TRUE(p.parse(j.c_str(), j.size()));
+  RGWExtAuthzConfig e;
+  e.decode_json(&p);
+  EXPECT_EQ(RGWExtAuthzConfig::default_connect_timeout_secs,
+            e.connect_timeout_secs);
+  EXPECT_EQ(RGWExtAuthzConfig::default_request_timeout_secs,
+            e.request_timeout_secs);
+}
+
 TEST(ExtAuthzConfig, ValidateRejectsBadActions)
 {
   std::string err;
