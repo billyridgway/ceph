@@ -102,18 +102,23 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument('--port', type=int, default=8443)
     p.add_argument('--cert', default='/tmp/ext-authz-mock.pem')
+    p.add_argument('--host', default='127.0.0.1',
+                   help='address to listen on (0.0.0.0 to serve other hosts)')
+    p.add_argument('--san', default='DNS:localhost,IP:127.0.0.1',
+                   help='subjectAltName of the certificate, e.g. '
+                        'DNS:mock.example,IP:10.0.0.5')
     args = p.parse_args()
 
     key = args.cert + '.key'
     subprocess.check_call([
         'openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
         '-keyout', key, '-out', args.cert, '-days', '2', '-subj',
-        '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1'],
+        '/CN=localhost', '-addext', 'subjectAltName=' + args.san],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(args.cert, key)
-    srv = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     srv.serve_forever()
 
