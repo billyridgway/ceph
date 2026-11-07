@@ -21,12 +21,12 @@
 #include <string_view>
 
 #include "common/async/yield_context.h"
+#include "common/Formatter.h"
 #include "common/ceph_json.h"
 #include "include/buffer.h"
 #include "include/encoding.h"
 
 class DoutPrefixProvider;
-class Formatter;
 struct RGWObjVersionTracker;
 namespace rgw::sal { class Driver; }
 
