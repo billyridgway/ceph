@@ -63,6 +63,12 @@ void add_rgw_frontend_counters(PerfCountersBuilder *pcb) {
   pcb->add_u64_counter(l_rgw_d4n_cache_hits, "d4n_cache_hits", "D4N cache hits");
   pcb->add_u64_counter(l_rgw_d4n_cache_misses, "d4n_cache_misses", "D4N cache misses");
   pcb->add_u64_counter(l_rgw_d4n_cache_evictions, "d4n_cache_evictions", "D4N cache evictions");
+
+  pcb->add_u64_counter(l_rgw_ext_authz_req, "ext_authz_req", "External authorizer requests");
+  pcb->add_u64_counter(l_rgw_ext_authz_allow, "ext_authz_allow", "External authorizer explicit Allow decisions");
+  pcb->add_u64_counter(l_rgw_ext_authz_deny, "ext_authz_deny", "External authorizer explicit Deny decisions");
+  pcb->add_u64_counter(l_rgw_ext_authz_error, "ext_authz_error", "External authorizer failures (timeouts, connectivity, invalid response, misconfiguration), denied");
+  pcb->add_time_avg(l_rgw_ext_authz_lat, "ext_authz_lat", "External authorizer request latency");
 }
 
 void add_rgw_op_counters(PerfCountersBuilder *lpcb) {

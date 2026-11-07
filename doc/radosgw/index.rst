@@ -73,6 +73,7 @@ Cluster with one API and then retrieve that data with the other API.
    Bucket Notifications <notifications>
    Data Layout in RADOS <layout>
    STS <STS>
+   STS External Authorization <ext_authz>
    STS Lite <STSLite>
    Keycloak <keycloak>
    Session Tags <session-tags>

@@ -629,7 +629,22 @@ int RGWHTTPClient::init_request(rgw_http_req_data *_req_data)
     curl_easy_setopt(easy_handle, CURLOPT_SSL_VERIFYHOST, 0L);
     dout(20) << "ssl verification is set to off" << dendl;
   } else {
-    if (!ca_path.empty()) {
+    if (!ca_blob.empty()) {
+#if LIBCURL_VERSION_NUM >= 0x074d00 // 7.77.0
+      curl_blob blob;
+      blob.data = const_cast<char*>(ca_blob.data());
+      blob.len = ca_blob.size();
+      blob.flags = CURL_BLOB_COPY;
+      if (curl_easy_setopt(easy_handle, CURLOPT_CAINFO_BLOB, &blob) != CURLE_OK) {
+        dout(0) << "ERROR: failed to set the custom ca bundle" << dendl;
+        return -EINVAL;
+      }
+      dout(20) << "using custom ca bundle for ssl" << dendl;
+#else
+      dout(0) << "ERROR: a ca bundle blob requires libcurl >= 7.77" << dendl;
+      return -ENOTSUP;
+#endif
+    } else if (!ca_path.empty()) {
       curl_easy_setopt(easy_handle, CURLOPT_CAINFO, ca_path.c_str());
       dout(20) << "using custom ca cert "<< ca_path.c_str() << " for ssl" << dendl;
     }

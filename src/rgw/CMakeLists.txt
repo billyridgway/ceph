@@ -115,6 +115,7 @@ set(librgw_common_srcs
   rgw_rest_client.cc
   rgw_rest_config.cc
   rgw_rest_conn.cc
+  rgw_rest_ext_authz.cc
   rgw_rest_metadata.cc
   rgw_rest_ratelimit.cc
   rgw_rest_role.cc
@@ -150,6 +151,8 @@ set(librgw_common_srcs
   rgw_kms.cc
   rgw_kmip_client.cc
   rgw_url.cc
+  rgw_ext_authz.cc
+  rgw_ext_authz_ibm.cc
   rgw_oidc_provider.cc
   rgw_log.cc
   rgw_lua_request.cc
@@ -216,6 +219,7 @@ set(librgw_common_srcs
   driver/rados/rgw_trim_mdlog.cc
   driver/rados/rgw_user.cc
   driver/rados/rgw_zone.cc
+  driver/rados/ext_authz.cc
   driver/rados/role.cc
   driver/rados/roles.cc
   driver/rados/sync_fairness.cc

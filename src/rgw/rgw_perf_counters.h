@@ -53,6 +53,12 @@ enum {
   l_rgw_d4n_cache_misses,
   l_rgw_d4n_cache_evictions,
 
+  l_rgw_ext_authz_req,
+  l_rgw_ext_authz_allow,
+  l_rgw_ext_authz_deny,
+  l_rgw_ext_authz_error,
+  l_rgw_ext_authz_lat,
+
   l_rgw_last,
 };
 

@@ -42,6 +42,7 @@
 #include "rgw_iam_policy_keywords.h"
 
 #include "rgw_sts.h"
+#include "rgw_ext_authz.h"
 #include "rgw_rest_oidc_provider.h"
 #include "rgw_asio_thread.h"
 
@@ -869,6 +870,26 @@ int RGWREST_STS::verify_permission(optional_yield y)
   } catch (rgw::IAM::PolicyParseException& e) {
     ldpp_dout(this, 0) << "failed to parse policy: " << e.what() << dendl;
     return -EPERM;
+  }
+
+  // The native trust policy allowed the request. If an external authorizer is
+  // enabled it must also explicitly allow AssumeRoleWithWebIdentity before
+  // credentials are issued. Failures of the authorizer deny the request.
+  if (get_type() == RGW_STS_ASSUME_ROLE_WEB_IDENTITY) {
+    rgw::ext_authz::Request authz_req;
+    authz_req.request_type = "AssumeRoleWithWebIdentity";
+    authz_req.subject_token = s->info.args.get("WebIdentityToken");
+    authz_req.subject = s->info.args.get("sub");
+    authz_req.issuer = s->info.args.get("provider_id");
+    authz_req.account_id = role->get_account_id();
+    authz_req.role_arn = rArn;
+    authz_req.role_name = role->get_name();
+    authz_req.correlation_id = s->trans_id;
+    if (int ret = rgw::ext_authz::authorize(this, y, driver, authz_req);
+        ret < 0) {
+      s->err.message = "Not authorized to assume the role";
+      return -EACCES;
+    }
   }
 
   return 0;

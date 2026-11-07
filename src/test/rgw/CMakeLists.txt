@@ -107,6 +107,11 @@ add_executable(unittest_rgw_bucket_sync_cache test_rgw_bucket_sync_cache.cc)
 add_ceph_unittest(unittest_rgw_bucket_sync_cache)
 target_link_libraries(unittest_rgw_bucket_sync_cache ${rgw_libs})
 
+# unittest_rgw_ext_authz
+add_executable(unittest_rgw_ext_authz test_rgw_ext_authz.cc)
+add_ceph_unittest(unittest_rgw_ext_authz)
+target_link_libraries(unittest_rgw_ext_authz ${rgw_libs})
+
 #unittest_rgw_period_history
 add_executable(unittest_rgw_period_history test_rgw_period_history.cc)
 add_ceph_unittest(unittest_rgw_period_history)
