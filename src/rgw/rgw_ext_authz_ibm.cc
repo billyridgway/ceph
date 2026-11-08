@@ -25,6 +25,7 @@
 //          "subject": {"accessTokenBody": "<user JWT>"}}]
 //        -> {"responses": [{"authorizationDecision": {"permitted": true}}]}
 
+#include <algorithm>
 #include <charconv>
 #include <fstream>
 #include <mutex>
@@ -274,6 +275,28 @@ class Provider final : public rgw::ext_authz::Provider {
     return r == -EPERM ? -EACCES : r;
   }
 
+  // Log the start of a failed reply so the remote error text is visible.
+  // Control characters are replaced so a reply cannot forge log lines.
+  static void log_error_body(const DoutPrefixProvider* dpp, const char* what,
+                             const bufferlist& resp) {
+    constexpr size_t max_logged_bytes = 512;
+    if (resp.length() == 0) {
+      ldpp_dout(dpp, 1) << "ext_authz: " << what << " reply body is empty"
+          << dendl;
+      return;
+    }
+    std::string body = resp.to_str();
+    const bool truncated = body.size() > max_logged_bytes;
+    body.resize(std::min(body.size(), max_logged_bytes));
+    for (auto& c : body) {
+      if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) {
+        c = ' ';
+      }
+    }
+    ldpp_dout(dpp, 1) << "ext_authz: " << what << " reply body"
+        << (truncated ? " (truncated)" : "") << ": " << body << dendl;
+  }
+
   static void configure(RGWHTTPClient& req, const RGWExtAuthzConfig& cfg) {
     req.set_verify_ssl(true); // never optional
     req.set_req_connect_timeout(cfg.connect_timeout_secs);
@@ -324,6 +347,7 @@ class Provider final : public rgw::ext_authz::Provider {
     if (r < 0) {
       ldpp_dout(dpp, 0) << "ERROR: ext_authz: token request failed r=" << r
           << " http_status=" << req.get_http_status() << dendl;
+      log_error_body(dpp, "token", resp);
       return transport_error(r);
     }
     if (resp.length() > max_response_bytes) {
@@ -414,6 +438,7 @@ class Provider final : public rgw::ext_authz::Provider {
     if (r < 0) {
       ldpp_dout(dpp, 0) << "ERROR: ext_authz: authz request failed r=" << r
           << " http_status=" << http.get_http_status() << dendl;
+      log_error_body(dpp, "authz", resp);
       return transport_error(r);
     }
     if (resp.length() > max_response_bytes) {
