@@ -47,7 +47,7 @@ Request make_request(const std::string& role_name)
 {
   Request r;
   r.request_type = "AssumeRoleWithWebIdentity";
-  r.subject_token = "user.jwt.token";
+  r.subject_token = "hdr.payload.sig";
   r.subject = "IBMid-123";
   r.issuer = "iam.cloud.ibm.com/identity";
   r.account_id = "RGW11111111111111111";
@@ -189,8 +189,21 @@ TEST(ExtAuthzIbm, PepRequestForCustomRoleCarriesRoleArn)
   EXPECT_EQ(crn.account_id, attrs->find_obj("accountId")->get_data());
   EXPECT_EQ(req.account_id, attrs->find_obj("objectAccount")->get_data());
   EXPECT_EQ(req.role_arn, attrs->find_obj("objectRole")->get_data());
-  EXPECT_EQ("user.jwt.token",
+  // only the payload segment is sent, never the signed token
+  EXPECT_EQ("payload",
             r->find_obj("subject")->find_obj("accessTokenBody")->get_data());
+}
+
+TEST(ExtAuthzIbm, JwtPayload)
+{
+  EXPECT_EQ("payload", jwt_payload("hdr.payload.sig"));
+  EXPECT_EQ("", jwt_payload(""));
+  EXPECT_EQ("", jwt_payload("nodots"));
+  EXPECT_EQ("", jwt_payload("one.two"));
+  EXPECT_EQ("", jwt_payload(".payload.sig"));
+  EXPECT_EQ("", jwt_payload("hdr..sig"));
+  EXPECT_EQ("", jwt_payload("hdr.payload."));
+  EXPECT_EQ("", jwt_payload("a.b.c.d"));
 }
 
 TEST(ExtAuthzIbm, PepRequestForStandardActionHasNoRoleAttribute)

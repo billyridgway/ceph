@@ -40,7 +40,9 @@ Providers
 Uses IBM IAM. RGW obtains an access token with an API key
 (``POST {endpoint}/identity/token``) and asks the policy enforcement service
 (``POST {pep_endpoint or endpoint}/v2/authz``) with the caller's web identity
-token as the subject.
+token as the subject. Only the payload (middle) segment of the JWT is sent as
+``subject.accessTokenBody``, which is what IBM IAM accepts; the signed token
+never leaves RGW.
 
 The action is chosen from the role RGW resolved, never from caller input. The
 action names are configurable (``action_readonly``, ``action_readwrite`` and

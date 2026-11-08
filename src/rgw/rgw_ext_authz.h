@@ -204,6 +204,10 @@ bool is_predefined_role(const RGWExtAuthzConfig& cfg, const Request& req);
 /// other role requires the assume-role action.
 std::string select_action(const RGWExtAuthzConfig& cfg, const Request& req);
 
+/// The payload (middle) segment of a JWT, or empty if 'token' is not of the
+/// form header.payload.signature. IBM IAM takes this as the subject.
+std::string_view jwt_payload(std::string_view token);
+
 /// JSON body of a PEP /v2/authz request. With scope_to_role the resource also
 /// carries the role ARN, which is how a custom role is authorized individually.
 std::string build_pep_request(const Crn& crn, std::string_view action,

@@ -22,7 +22,7 @@
 //        Authorization: Bearer <access token>, transaction-id: <corr id>
 //        [{"action": "...",
 //          "resource": {"attributes": {...}},
-//          "subject": {"accessTokenBody": "<user JWT>"}}]
+//          "subject": {"accessTokenBody": "<JWT payload segment>"}}]
 //        -> {"responses": [{"authorizationDecision": {"permitted": true}}]}
 
 #include <algorithm>
@@ -131,6 +131,22 @@ std::string select_action(const RGWExtAuthzConfig& cfg, const Request& req)
   return cfg.action_assume_role;
 }
 
+std::string_view jwt_payload(std::string_view token)
+{
+  // header.payload.signature, each non-empty
+  const auto first = token.find('.');
+  if (first == std::string_view::npos || first == 0) {
+    return {};
+  }
+  const auto second = token.find('.', first + 1);
+  if (second == std::string_view::npos || second == first + 1 ||
+      second + 1 >= token.size() ||
+      token.find('.', second + 1) != std::string_view::npos) {
+    return {};
+  }
+  return token.substr(first + 1, second - first - 1);
+}
+
 std::string build_pep_request(const Crn& crn, std::string_view action,
                               const Request& req, bool scope_to_role)
 {
@@ -151,7 +167,8 @@ std::string build_pep_request(const Crn& crn, std::string_view action,
   f.close_section(); // attributes
   f.close_section(); // resource
   f.open_object_section("subject");
-  f.dump_string("accessTokenBody", req.subject_token);
+  // IBM IAM expects the payload segment of the JWT, not the whole token
+  f.dump_string("accessTokenBody", jwt_payload(req.subject_token));
   f.close_section(); // subject
   f.close_section(); // request
   f.close_section(); // array
@@ -395,6 +412,11 @@ class Provider final : public rgw::ext_authz::Provider {
     if (req.subject_token.empty() || req.account_id.empty() ||
         req.role_arn.empty() || req.correlation_id.empty()) {
       ldpp_dout(dpp, 0) << "ERROR: ext_authz: incomplete request" << dendl;
+      return -EINVAL;
+    }
+    if (jwt_payload(req.subject_token).empty()) {
+      ldpp_dout(dpp, 0) << "ERROR: ext_authz: subject token is not a JWT"
+          << dendl;
       return -EINVAL;
     }
     Crn crn;
