@@ -280,9 +280,13 @@ class Provider final : public rgw::ext_authz::Provider {
         life > 0 ? life : 0);
   }
 
-  void drop_cached() {
+  // Forget the cached token, but only if it is the one that was rejected: a
+  // concurrent request may already have replaced it with a good one.
+  void drop_cached(const std::string& rejected) {
     std::lock_guard l{lock};
-    cached = CachedToken{};
+    if (cached.token == rejected) {
+      cached = CachedToken{};
+    }
   }
 
   // The HTTP client maps a 401 reply to -EPERM, which the caller reads as an
@@ -382,6 +386,34 @@ class Provider final : public rgw::ext_authz::Provider {
     return 0;
   }
 
+  // One POST to /v2/authz. Returns the HTTP client result and sets 'status'.
+  int call_authz(const DoutPrefixProvider* dpp, optional_yield y,
+                 const RGWExtAuthzConfig& cfg, const Request& req,
+                 const std::string& token, const std::string& body,
+                 bufferlist& resp, int& status) {
+    RGWHTTPTransceiver http(
+        dpp->get_cct(), "POST",
+        join_url(cfg.pep_endpoint.empty() ? cfg.endpoint : cfg.pep_endpoint,
+                 "/v2/authz"),
+        &resp);
+    configure(http, cfg);
+    http.append_header("Authorization", "Bearer " + token);
+    http.append_header("Content-Type", "application/json");
+    http.append_header("Accept", "application/json");
+    http.append_header("transaction-id", req.correlation_id);
+    http.set_post_data(body);
+    http.set_send_length(body.size());
+
+    int r = http.process(dpp, y);
+    status = http.get_http_status();
+    if (r < 0) {
+      ldpp_dout(dpp, 0) << "ERROR: ext_authz: authz request failed r=" << r
+          << " http_status=" << status << dendl;
+      log_error_body(dpp, "authz", resp);
+    }
+    return r;
+  }
+
  public:
   std::string_view name() const override { return provider_name; }
 
@@ -430,37 +462,43 @@ class Provider final : public rgw::ext_authz::Provider {
       return r;
     }
     const std::string key = cache_key(cfg.endpoint, credential);
+    const std::string body = build_pep_request(crn, action, req,
+                                              !is_predefined_role(cfg, req));
     std::string token;
-    if (!get_cached(key, token)) {
+    bool token_was_cached = get_cached(key, token);
+    if (!token_was_cached) {
       if (int r = fetch_token(dpp, y, cfg, credential, key, token); r < 0) {
         return r;
       }
     }
 
     bufferlist resp;
-    RGWHTTPTransceiver http(
-        dpp->get_cct(), "POST",
-        join_url(cfg.pep_endpoint.empty() ? cfg.endpoint : cfg.pep_endpoint,
-                 "/v2/authz"),
-        &resp);
-    configure(http, cfg);
-    http.append_header("Authorization", "Bearer " + token);
-    http.append_header("Content-Type", "application/json");
-    http.append_header("Accept", "application/json");
-    http.append_header("transaction-id", req.correlation_id);
-    const std::string body = build_pep_request(crn, action, req,
-                                              !is_predefined_role(cfg, req));
-    http.set_post_data(body);
-    http.set_send_length(body.size());
-
-    int r = http.process(dpp, y);
-    if (http.get_http_status() == 401) {
-      drop_cached(); // revoked or expired earlier than advertised
+    int status = 0;
+    int r = call_authz(dpp, y, cfg, req, token, body, resp, status);
+    if (status == 401) {
+      drop_cached(token); // revoked or expired earlier than advertised
+      // A cached token may have been revoked or rotated before its advertised
+      // expiry, so get a new one and ask once more. A token fetched for this
+      // request was just issued; a second one would not change the answer.
+      if (token_was_cached) {
+        ldpp_dout(dpp, 5) << "ext_authz: cached token rejected, "
+            "retrying once with a new token" << dendl;
+        std::string fresh;
+        if (!get_cached(key, fresh)) { // another request may have renewed it
+          if (int rt = fetch_token(dpp, y, cfg, credential, key, fresh);
+              rt < 0) {
+            return rt;
+          }
+        }
+        resp.clear();
+        status = 0;
+        r = call_authz(dpp, y, cfg, req, fresh, body, resp, status);
+        if (status == 401) {
+          drop_cached(fresh);
+        }
+      }
     }
     if (r < 0) {
-      ldpp_dout(dpp, 0) << "ERROR: ext_authz: authz request failed r=" << r
-          << " http_status=" << http.get_http_status() << dendl;
-      log_error_body(dpp, "authz", resp);
       return transport_error(r);
     }
     if (resp.length() > max_response_bytes) {

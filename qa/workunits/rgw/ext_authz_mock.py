@@ -11,7 +11,10 @@ The decision is chosen with POST /mock/mode {"mode": "..."}:
   error          HTTP 500
   malformed      HTTP 200 with a body that is not a decision
   slow           answer after 'delay' seconds
-  unauthorized   HTTP 401 for /v2/authz, to test token renewal
+  unauthorized   HTTP 401 for /v2/authz whatever the token
+POST /mock/rotate makes the token handed out so far invalid, as if IAM had
+revoked it early. The next /identity/token call returns a new one. RGW must
+get a new token and retry once, so the request still succeeds.
 GET /mock/stats returns the number of token and authz calls and the last
 authz request, so a test can check what RGW sent.
 
@@ -29,10 +32,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 STATE = {'mode': 'allow', 'delay': 0.0, 'token_calls': 0, 'authz_calls': 0,
-         'last_authz': None, 'last_headers': None, 'bad_token_calls': 0}
+         'last_authz': None, 'last_headers': None, 'bad_token_calls': 0,
+         'token_generation': 0}
 LOCK = threading.Lock()
 API_KEY = 'test-api-key'
-TOKEN = 'mock-service-token'
+
+
+def current_token():
+    with LOCK:
+        return 'mock-service-token-%d' % STATE['token_generation']
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -64,6 +72,10 @@ class Handler(BaseHTTPRequestHandler):
                 STATE['mode'] = req['mode']
                 STATE['delay'] = float(req.get('delay', 0))
             return self._reply(200, {})
+        if self.path == '/mock/rotate':
+            with LOCK:
+                STATE['token_generation'] += 1
+            return self._reply(200, {})
         if self.path == '/identity/token':
             form = parse_qs(raw.decode())
             with LOCK:
@@ -72,7 +84,8 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:
                     STATE['bad_token_calls'] += 1
                 return self._reply(400, {'errorCode': 'BXNIM0415E'})
-            return self._reply(200, {'access_token': TOKEN, 'expires_in': 3600,
+            return self._reply(200, {'access_token': current_token(),
+                                     'expires_in': 3600,
                                      'token_type': 'Bearer'})
         if self.path == '/v2/authz':
             with LOCK:
@@ -82,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
                     'authorization': self.headers.get('Authorization'),
                     'transaction-id': self.headers.get('transaction-id')}
                 mode, delay = STATE['mode'], STATE['delay']
-            if self.headers.get('Authorization') != 'Bearer ' + TOKEN:
+            if self.headers.get('Authorization') != 'Bearer ' + current_token():
                 return self._reply(401, {})
             if mode == 'slow':
                 time.sleep(delay)

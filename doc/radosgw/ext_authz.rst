@@ -26,8 +26,10 @@ returns an explicit Allow. The request is denied (HTTP 403) when the service:
 * or when the stored configuration is invalid or cannot be read.
 
 Decisions are not cached. Only the access token that authenticates RGW to the
-service is cached, until shortly before it expires. TLS certificates are
-always verified.
+service is cached, until shortly before it expires. If the service rejects a
+cached token with HTTP 401 (for example because it was revoked early), RGW
+fetches a new token and repeats the request once. No other failure is retried.
+TLS certificates are always verified.
 
 When no configuration is set, or ``enabled`` is false, STS behaves as before
 for roles that do not name an authorizer.
