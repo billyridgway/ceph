@@ -51,6 +51,13 @@ the tag has an empty value or several different values. A role without the tag
 is unaffected. The tag key is matched exactly, so a misspelled key is the same
 as no tag.
 
+Any tag on a role makes RGW check ``sts:TagSession`` in the role's trust
+policy, because role tags are loaded as principal tags. A tagged role whose
+trust policy does not allow ``sts:TagSession`` is denied before the
+authorizer is asked, with an ``AccessDenied`` that carries no message. Add
+``sts:TagSession`` to the ``Action`` of the trust policy statements when
+tagging a role.
+
 Anyone allowed to tag the role can also remove the tag, so restrict
 ``iam:TagRole`` and ``iam:UntagRole`` to administrators.
 
