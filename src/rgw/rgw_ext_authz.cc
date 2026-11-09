@@ -222,13 +222,57 @@ void count(int r)
 
 } // anonymous namespace
 
+void apply_role_tags(Request& req,
+                     const std::multimap<std::string, std::string>& tags)
+{
+  req.required_provider.clear();
+  req.authorizer_tag_invalid = false;
+  const auto range = tags.equal_range(std::string(required_tag_key));
+  for (auto i = range.first; i != range.second; ++i) {
+    // An empty value, or two different values, cannot name one provider. The
+    // role then cannot be assumed, so a typo never drops the requirement.
+    if (i->second.empty() ||
+        (!req.required_provider.empty() && req.required_provider != i->second)) {
+      req.authorizer_tag_invalid = true;
+    }
+    req.required_provider = i->second;
+  }
+}
+
 int authorize(const DoutPrefixProvider* dpp, optional_yield y,
               rgw::sal::Driver* driver, const Request& req)
 {
+  if (req.authorizer_tag_invalid) {
+    ldpp_dout(dpp, 0) << "ERROR: ext_authz: role tag " << required_tag_key
+        << " must name exactly one provider" << dendl;
+    count(-EINVAL);
+    audit(dpp, req, "", -EINVAL, 0, "invalid role tag");
+    return -EPERM;
+  }
+  const bool tagged = !req.required_provider.empty();
+
   RGWExtAuthzConfig cfg;
   int r = driver->load_ext_authz_config(dpp, y, cfg, nullptr);
-  if (r == -ENOENT || r == -ENOTSUP) {
-    return 0; // no external authorizer, STS is unchanged
+  const bool not_configured =
+      r == -ENOENT || r == -ENOTSUP || (r == 0 && !cfg.enabled);
+  if (not_configured) {
+    if (!tagged) {
+      return 0; // no external authorizer, STS is unchanged
+    }
+    // the role names an authorizer that must decide, and there is none
+    ldpp_dout(dpp, 0) << "ERROR: ext_authz: role requires authorizer "
+        << req.required_provider << " but none is enabled" << dendl;
+    count(-ENOENT);
+    audit(dpp, req, "", -ENOENT, 0, "required authorizer not enabled");
+    return -EPERM;
+  }
+  if (r == 0 && tagged && cfg.provider != req.required_provider) {
+    ldpp_dout(dpp, 0) << "ERROR: ext_authz: role requires authorizer "
+        << req.required_provider << " but the enabled one is "
+        << cfg.provider << dendl;
+    count(-EINVAL);
+    audit(dpp, req, "", -EINVAL, 0, "required authorizer differs");
+    return -EPERM;
   }
   if (r < 0) {
     // we cannot tell whether an authorizer is required, so do not issue
@@ -237,9 +281,6 @@ int authorize(const DoutPrefixProvider* dpp, optional_yield y,
     count(r);
     audit(dpp, req, "", r, 0, "config unreadable");
     return -EPERM;
-  }
-  if (!cfg.enabled) {
-    return 0;
   }
 
   const auto start = ceph::mono_clock::now();

@@ -16,6 +16,7 @@
 #pragma once
 
 #include <list>
+#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -125,6 +126,12 @@ WRITE_CLASS_ENCODER(RGWExtAuthzConfig)
 
 namespace rgw::ext_authz {
 
+/// A role carrying this tag requires the external authorizer named by the
+/// tag value (a provider name such as "ibm-iam"). Unless that provider is the
+/// configured and enabled one, the role cannot be assumed, so removing,
+/// disabling or mistyping the authorizer never leaves the role open.
+constexpr std::string_view required_tag_key = "rgw:ext-authz";
+
 /// The facts RGW hands to an authorizer for one AssumeRoleWithWebIdentity.
 struct Request {
   /// kind of STS request, "AssumeRoleWithWebIdentity"
@@ -141,7 +148,15 @@ struct Request {
   std::string role_name;
   /// request correlation id
   std::string correlation_id;
+  /// provider named by the role's required_tag_key tag, empty if untagged
+  std::string required_provider;
+  /// the tag is present but unusable: empty, or more than one distinct value
+  bool authorizer_tag_invalid = false;
 };
+
+/// Set required_provider / authorizer_tag_invalid from the role's tags.
+void apply_role_tags(Request& req,
+                     const std::multimap<std::string, std::string>& tags);
 
 /// A pluggable authorization provider. Implementations must be thread safe;
 /// one instance serves concurrent requests.
@@ -177,8 +192,10 @@ int store_config(const DoutPrefixProvider* dpp, optional_yield y,
                  rgw::sal::Driver* driver, RGWExtAuthzConfig& cfg);
 
 /// Authorize an AssumeRoleWithWebIdentity request. Returns 0 if no external
-/// authorizer is enabled or it allowed the request, and -EPERM otherwise,
-/// which includes provider failures, timeouts and invalid configuration.
+/// authorizer is enabled (and the role does not require one) or it allowed the
+/// request, and -EPERM otherwise, which includes provider failures, timeouts,
+/// invalid configuration, and a role that requires an authorizer that is
+/// absent or disabled.
 int authorize(const DoutPrefixProvider* dpp, optional_yield y,
               rgw::sal::Driver* driver, const Request& req);
 

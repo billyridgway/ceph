@@ -29,7 +29,28 @@ Decisions are not cached. Only the access token that authenticates RGW to the
 service is cached, until shortly before it expires. TLS certificates are
 always verified.
 
-When no configuration is set, or ``enabled`` is false, STS behaves as before.
+When no configuration is set, or ``enabled`` is false, STS behaves as before
+for roles that do not name an authorizer.
+
+Requiring an authorizer for a role
+----------------------------------
+
+Tag a role with ``rgw:ext-authz`` and the name of the provider to bind it to
+that authorizer::
+
+   aws iam tag-role --role-name ibmreadonly \
+       --tags Key=rgw:ext-authz,Value=ibm-iam
+
+The role can then be assumed only while the configured, enabled authorizer is
+that provider. Otherwise AssumeRoleWithWebIdentity is denied, so removing or
+disabling the authorizer, or setting a different provider, does not leave the
+role open to whatever its trust policy allows. The request is also denied when
+the tag has an empty value or several different values. A role without the tag
+is unaffected. The tag key is matched exactly, so a misspelled key is the same
+as no tag.
+
+Anyone allowed to tag the role can also remove the tag, so restrict
+``iam:TagRole`` and ``iam:UntagRole`` to administrators.
 
 Providers
 =========

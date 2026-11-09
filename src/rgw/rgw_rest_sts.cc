@@ -874,7 +874,9 @@ int RGWREST_STS::verify_permission(optional_yield y)
 
   // The native trust policy allowed the request. If an external authorizer is
   // enabled it must also explicitly allow AssumeRoleWithWebIdentity before
-  // credentials are issued. Failures of the authorizer deny the request.
+  // credentials are issued. Failures of the authorizer deny the request. A
+  // role tagged rgw:ext-authz=<provider> is denied unless that provider is
+  // the enabled authorizer.
   if (get_type() == RGW_STS_ASSUME_ROLE_WEB_IDENTITY) {
     rgw::ext_authz::Request authz_req;
     authz_req.request_type = "AssumeRoleWithWebIdentity";
@@ -885,6 +887,9 @@ int RGWREST_STS::verify_permission(optional_yield y)
     authz_req.role_arn = rArn;
     authz_req.role_name = role->get_name();
     authz_req.correlation_id = s->trans_id;
+    if (auto tags = role->get_tags()) {
+      rgw::ext_authz::apply_role_tags(authz_req, *tags);
+    }
     if (int ret = rgw::ext_authz::authorize(this, y, driver, authz_req);
         ret < 0) {
       s->err.message = "Not authorized to assume the role";

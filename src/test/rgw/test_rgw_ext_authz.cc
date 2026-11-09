@@ -221,6 +221,65 @@ TEST(ExtAuthzIbm, PepRequestForStandardActionHasNoRoleAttribute)
   EXPECT_NE(nullptr, attrs->find_obj("objectAccount"));
 }
 
+// ---- role tag that binds a role to an authorizer
+
+TEST(ExtAuthzRoleTag, UntaggedRoleHasNoRequirement)
+{
+  Request r;
+  apply_role_tags(r, {{"team", "storage"}});
+  EXPECT_TRUE(r.required_provider.empty());
+  EXPECT_FALSE(r.authorizer_tag_invalid);
+}
+
+TEST(ExtAuthzRoleTag, TagValueNamesTheProvider)
+{
+  Request r;
+  apply_role_tags(r, {{"team", "storage"}, {"rgw:ext-authz", "ibm-iam"}});
+  EXPECT_EQ("ibm-iam", r.required_provider);
+  EXPECT_FALSE(r.authorizer_tag_invalid);
+}
+
+TEST(ExtAuthzRoleTag, EmptyValueIsInvalid)
+{
+  Request r;
+  apply_role_tags(r, {{"rgw:ext-authz", ""}});
+  EXPECT_TRUE(r.authorizer_tag_invalid);
+}
+
+TEST(ExtAuthzRoleTag, ConflictingValuesAreInvalid)
+{
+  Request r;
+  apply_role_tags(r, {{"rgw:ext-authz", "ibm-iam"}, {"rgw:ext-authz", "other"}});
+  EXPECT_TRUE(r.authorizer_tag_invalid);
+}
+
+TEST(ExtAuthzRoleTag, RepeatedSameValueIsValid)
+{
+  Request r;
+  apply_role_tags(r, {{"rgw:ext-authz", "ibm-iam"}, {"rgw:ext-authz", "ibm-iam"}});
+  EXPECT_EQ("ibm-iam", r.required_provider);
+  EXPECT_FALSE(r.authorizer_tag_invalid);
+}
+
+TEST(ExtAuthzRoleTag, ApplyResetsEarlierState)
+{
+  Request r;
+  apply_role_tags(r, {{"rgw:ext-authz", ""}});
+  ASSERT_TRUE(r.authorizer_tag_invalid);
+  apply_role_tags(r, {});
+  EXPECT_TRUE(r.required_provider.empty());
+  EXPECT_FALSE(r.authorizer_tag_invalid);
+}
+
+TEST(ExtAuthzRoleTag, KeyMatchIsExact)
+{
+  // a near miss of the key does not bind the role, and is not an error
+  Request r;
+  apply_role_tags(r, {{"rgw:ext-authz ", "ibm-iam"}, {"RGW:EXT-AUTHZ", "ibm-iam"}});
+  EXPECT_TRUE(r.required_provider.empty());
+  EXPECT_FALSE(r.authorizer_tag_invalid);
+}
+
 // ---- PEP response: only an explicit boolean true is Allow
 
 TEST(ExtAuthzIbm, PepResponseAllow)
