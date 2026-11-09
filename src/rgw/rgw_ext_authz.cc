@@ -192,8 +192,8 @@ void audit(const DoutPrefixProvider* dpp, const Request& req,
            const std::string& action, int r, double latency_ms,
            std::string_view note)
 {
-  // formatted here because the log stream's float format is shared state and
-  // printed 50 ms as "5e+01"
+  // fixed format: the log stream's default float format printed 50 ms as
+  // "5e+01"
   char latency[32];
   snprintf(latency, sizeof(latency), "%.3f", latency_ms);
   ldpp_dout(dpp, 1) << "ext_authz audit: decision=" << outcome_str(r)
