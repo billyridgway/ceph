@@ -51,12 +51,12 @@ the tag has an empty value or several different values. A role without the tag
 is unaffected. The tag key is matched exactly, so a misspelled key is the same
 as no tag.
 
-Any tag on a role makes RGW check ``sts:TagSession`` in the role's trust
-policy, because role tags are loaded as principal tags. A tagged role whose
-trust policy does not allow ``sts:TagSession`` is denied before the
-authorizer is asked, with an ``AccessDenied`` that carries no message. Add
-``sts:TagSession`` to the ``Action`` of the trust policy statements when
-tagging a role.
+The tag is control metadata for RGW. Unlike other role tags it is not copied
+into the session as ``aws:PrincipalTag/rgw:ext-authz``, so it does not make
+RGW require ``sts:TagSession`` in the trust policy and policies cannot match
+on it as an identity attribute. It is still visible to policies as the
+resource tag ``iam:ResourceTag/rgw:ext-authz``. Any other tag on the role, and
+any tag carried in the web identity token, is handled as before.
 
 Anyone allowed to tag the role can also remove the tag, so restrict
 ``iam:TagRole`` and ``iam:UntagRole`` to administrators.
