@@ -16,6 +16,7 @@
 #include "rgw_ext_authz.h"
 
 #include <chrono>
+#include <cstdio>
 
 #include "common/Formatter.h"
 #include "common/ceph_time.h"
@@ -191,12 +192,16 @@ void audit(const DoutPrefixProvider* dpp, const Request& req,
            const std::string& action, int r, double latency_ms,
            std::string_view note)
 {
+  // formatted here because the log stream's float format is shared state and
+  // printed 50 ms as "5e+01"
+  char latency[32];
+  snprintf(latency, sizeof(latency), "%.3f", latency_ms);
   ldpp_dout(dpp, 1) << "ext_authz audit: decision=" << outcome_str(r)
       << " request_type=" << req.request_type
       << " corr_id=" << req.correlation_id
       << " sub=" << req.subject << " iss=" << req.issuer
       << " account=" << req.account_id << " role=" << req.role_arn
-      << " action=" << action << " latency_ms=" << latency_ms
+      << " action=" << action << " latency_ms=" << latency
       << " result=" << r << (note.empty() ? "" : " note=") << note << dendl;
 }
 
