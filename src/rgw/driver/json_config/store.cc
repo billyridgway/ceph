@@ -142,7 +142,7 @@ void sanity_check_config(const DoutPrefixProvider* dpp, DecodedConfig& config)
                                    &is_master, &read_only, endpoints,
                                    nullptr, nullptr, sync_from, sync_from_rm,
                                    nullptr, std::nullopt,
-                                   enable_features, disable_features);
+                                   enable_features, disable_features, nullptr);
     if (r < 0) {
       ldpp_dout(dpp, 0) << "failed to add zone to zonegroup: "
           << cpp_strerror(r) << dendl;

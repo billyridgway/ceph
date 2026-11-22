@@ -313,6 +313,51 @@ struct RGWZonePlacementInfo {
 };
 WRITE_CLASS_ENCODER(RGWZonePlacementInfo)
 
+/// Configuration for a zone's gateway data plane (see
+/// doc/rgw/rgw-rdma-gateway.md): a paired-gateway read-through cache
+/// and bulk-fetch path between zones. Carried in the period config as
+/// part of RGWZone. The gateway engine itself is a standalone library
+/// (libgwengine) outside the RGW tree; this struct is only its
+/// configuration, and nothing consumes it yet.
+struct RGWZoneGatewayConfig {
+  bool enabled{false};
+  std::list<std::string> endpoints; ///< this zone's gateway daemon endpoints
+  std::string transport{"http"};    ///< http | udp | rdma | auto
+  uint32_t port{19112};             ///< gateway UDP listen port
+  uint64_t chunk_size{4 * 1024 * 1024}; ///< fetch/cache chunk size in bytes
+  uint64_t qos_sync_bps{0};         ///< sync/tiering rate cap, 0 = unlimited
+  uint64_t qos_read_bps{0};         ///< read-through rate cap, 0 = unlimited
+
+  void encode(bufferlist& bl) const {
+    ENCODE_START(1, 1, bl);
+    encode(enabled, bl);
+    encode(endpoints, bl);
+    encode(transport, bl);
+    encode(port, bl);
+    encode(chunk_size, bl);
+    encode(qos_sync_bps, bl);
+    encode(qos_read_bps, bl);
+    ENCODE_FINISH(bl);
+  }
+
+  void decode(bufferlist::const_iterator& bl) {
+    DECODE_START(1, bl);
+    decode(enabled, bl);
+    decode(endpoints, bl);
+    decode(transport, bl);
+    decode(port, bl);
+    decode(chunk_size, bl);
+    decode(qos_sync_bps, bl);
+    decode(qos_read_bps, bl);
+    DECODE_FINISH(bl);
+  }
+
+  void dump(Formatter *f) const;
+  void decode_json(JSONObj *obj);
+  static std::list<RGWZoneGatewayConfig> generate_test_instances();
+};
+WRITE_CLASS_ENCODER(RGWZoneGatewayConfig)
+
 struct RGWZone {
   std::string id;
   std::string name;
@@ -342,13 +387,15 @@ struct RGWZone {
 
   rgw::zone_features::set supported_features;
 
+  RGWZoneGatewayConfig gateway_config;
+
   RGWZone()
     : log_meta(false), log_data(false), read_only(false),
       bucket_index_max_shards(default_bucket_index_max_shards),
       sync_from_all(true) {}
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(8, 1, bl);
+    ENCODE_START(9, 1, bl);
     encode(name, bl);
     encode(endpoints, bl);
     encode(log_meta, bl);
@@ -361,11 +408,12 @@ struct RGWZone {
     encode(sync_from, bl);
     encode(redirect_zone, bl);
     encode(supported_features, bl);
+    encode(gateway_config, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(8, bl);
+    DECODE_START(9, bl);
     decode(name, bl);
     if (struct_v < 4) {
       id = name;
@@ -394,6 +442,9 @@ struct RGWZone {
     }
     if (struct_v >= 8) {
       decode(supported_features, bl);
+    }
+    if (struct_v >= 9) {
+      decode(gateway_config, bl);
     }
     DECODE_FINISH(bl);
   }

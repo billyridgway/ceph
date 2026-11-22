@@ -88,6 +88,7 @@ void RGWZone::dump(Formatter *f) const
   encode_json("sync_from", sync_from, f);
   encode_json("redirect_zone", redirect_zone, f);
   encode_json("supported_features", supported_features, f);
+  encode_json("gateway_config", gateway_config, f);
 }
 
 void RGWZone::decode_json(JSONObj *obj)
@@ -106,6 +107,7 @@ void RGWZone::decode_json(JSONObj *obj)
   JSONDecoder::decode_json("sync_from", sync_from, obj);
   JSONDecoder::decode_json("redirect_zone", redirect_zone, obj);
   JSONDecoder::decode_json("supported_features", supported_features, obj);
+  JSONDecoder::decode_json("gateway_config", gateway_config, obj);
 }
 
 rgw_pool RGWZoneGroup::get_pool(CephContext *cct_) const
@@ -734,6 +736,39 @@ std::string RGWZoneGroupPlacementTierS3::make_target_bucket_name(
   return templ;
 }
 
+void RGWZoneGatewayConfig::dump(Formatter *f) const
+{
+  encode_json("enabled", enabled, f);
+  encode_json("endpoints", endpoints, f);
+  encode_json("transport", transport, f);
+  encode_json("port", port, f);
+  encode_json("chunk_size", chunk_size, f);
+  encode_json("qos_sync_bps", qos_sync_bps, f);
+  encode_json("qos_read_bps", qos_read_bps, f);
+}
+
+list<RGWZoneGatewayConfig> RGWZoneGatewayConfig::generate_test_instances()
+{
+  list<RGWZoneGatewayConfig> o;
+  o.emplace_back();
+  o.emplace_back();
+  o.back().enabled = true;
+  o.back().endpoints = {"127.0.0.1:19112"};
+  o.back().transport = "udp";
+  return o;
+}
+
+void RGWZoneGatewayConfig::decode_json(JSONObj *obj)
+{
+  JSONDecoder::decode_json("enabled", enabled, obj);
+  JSONDecoder::decode_json("endpoints", endpoints, obj);
+  JSONDecoder::decode_json("transport", transport, obj);
+  JSONDecoder::decode_json("port", port, obj);
+  JSONDecoder::decode_json("chunk_size", chunk_size, obj);
+  JSONDecoder::decode_json("qos_sync_bps", qos_sync_bps, obj);
+  JSONDecoder::decode_json("qos_read_bps", qos_read_bps, obj);
+}
+
 void RGWZoneStorageClass::dump(Formatter *f) const
 {
   if (data_pool) {
@@ -976,7 +1011,8 @@ int add_zone_to_group(const DoutPrefixProvider* dpp, RGWZoneGroup& zonegroup,
                       const std::string *predirect_zone,
                       std::optional<int> bucket_index_max_shards,
                       const rgw::zone_features::set& enable_features,
-                      const rgw::zone_features::set& disable_features)
+                      const rgw::zone_features::set& disable_features,
+                      const RGWZoneGatewayConfig *pgateway_config)
 {
   const std::string& zone_id = zone_params.id;
   const std::string& zone_name = zone_params.name;
@@ -1044,6 +1080,9 @@ int add_zone_to_group(const DoutPrefixProvider* dpp, RGWZoneGroup& zonegroup,
   }
   if (bucket_index_max_shards) {
     zone.bucket_index_max_shards = *bucket_index_max_shards;
+  }
+  if (pgateway_config) {
+    zone.gateway_config = *pgateway_config;
   }
 
   // add/remove sync_from
@@ -1593,7 +1632,7 @@ static int create_default_zonegroup(const DoutPrefixProvider* dpp,
   int r = add_zone_to_group(dpp, info, default_zone, &is_master, nullptr,
                             empty_list, nullptr, nullptr, empty_list,
                             empty_list, nullptr, std::nullopt,
-                            info.enabled_features, disable_features);
+                            info.enabled_features, disable_features, nullptr);
   if (r < 0) {
     return r;
   }

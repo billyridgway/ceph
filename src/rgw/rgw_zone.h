@@ -833,7 +833,8 @@ int add_zone_to_group(const DoutPrefixProvider* dpp,
                       const std::string *predirect_zone,
                       std::optional<int> bucket_index_max_shards,
                       const rgw::zone_features::set& enable_features,
-                      const rgw::zone_features::set& disable_features);
+                      const rgw::zone_features::set& disable_features,
+                      const RGWZoneGatewayConfig *pgateway_config);
 
 /// Remove a zone by id from its zonegroup, promoting a new master zone if
 /// necessary.
