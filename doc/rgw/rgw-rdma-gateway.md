@@ -4,6 +4,8 @@ Status: design for a proof-of-concept branch, Nov 22, 2026.
 Branch: `wridgway/rgw-rdma-gateway` (billyridgway/ceph).
 Prototype and measurements: github.com/billyridgway/rgw-rdma-gateway
 (`bench/RESULTS.md` there is the evidence base for every number below).
+Revised Nov 22, 2026: the engine is factored as a standalone library
+(§4); the RGW tree carries only the consumer side (§5).
 
 ## 1. Summary
 
@@ -89,23 +91,86 @@ SHA-256-verified end to end.
   for sparse amplification and cache granularity, not throughput.
 - **D6 — No synchronous prefetch.** An async fetcher is a separate,
   later component; v1 omits prefetch entirely.
-- **D7 — Daemon + thin in-RGW client.** The transport/cache daemon is
-  paired 1:1 with a zone's RGWs (isolates transport crashes from S3
-  serving, keeps driver/UDP code out of the radosgw process). RGW links
-  a small client used by the fetch paths. The daemon serves bytes only
-  against scoped tokens (see Security); in the POC it reads the source
-  zone through the local RGW's S3 with sync credentials, as the
-  prototype did.
+- **D7 — A library, hosted two ways.** The engine (transport +
+  fetch/cache) is a standalone library (§4), not RGW code. RGW hosts it
+  in a daemon paired 1:1 with a zone's RGWs — isolating transport
+  crashes from S3 serving and keeping driver/UDP code out of the
+  radosgw process — and links only a thin client. Other software may
+  link the library directly. The daemon serves bytes only against
+  scoped tokens (see Security); in the POC its source backend reads the
+  local RGW's S3 with sync credentials, as the prototype did.
 
-## 4. Where it lands in the RGW tree
+## 4. The library factoring
+
+The engine is a standalone library (working name **libgwengine**),
+developed in the prototype repo; the Ceph tree contains only the
+consumer side. The prototype already sits on this boundary — the
+transport header and the gateway have no Ceph dependencies — so the
+factoring formalizes a line that exists rather than inventing one.
+
+**In the library:**
+
+- The windowed reliable-UDP transport (§6), behind a transport
+  interface that also admits HTTP and, later, RDMA verbs under the
+  same fetch calls.
+- The fetch/cache engine: chunk addressing by (object, version,
+  range), pipelined fetching, stream-through delivery, STAT/ETag
+  revalidation, LRU eviction.
+- Scoped-token *verification*: signature, scope, and expiry are
+  checked before bytes move.
+
+**Interfaces the host provides:**
+
+- *Source backend* (serve side): `stat(object) -> version/ETag` and
+  `fetch(object, version, range) -> bytes`. RGW's daemon implements it
+  over the local zone (S3 in the POC, SAL later); a filesystem gateway
+  implements it over files; each host maps its own store.
+- *Cache backend*: chunk get/put/evict. A disk implementation ships
+  with the library; hosts may substitute their own store.
+- *Token issuance and all access decisions stay with the host.* The
+  library verifies tokens; it never issues them and never decides who
+  may read what.
+
+**API sketch** (indicative; a C surface, for embeddability):
+
+```c
+gw_engine_t *gw_engine_create(const gw_config_t *cfg);
+int  gw_stat (gw_engine_t *, const gw_peer_t *, const gw_obj_t *,
+              const gw_token_t *, gw_version_t *out);
+int  gw_fetch(gw_engine_t *, const gw_peer_t *, const gw_obj_t *,
+              const gw_version_t *, gw_range_t,
+              const gw_token_t *, gw_sink_t *sink);   /* streams */
+int  gw_serve(gw_engine_t *, const gw_source_ops_t *src,
+              const gw_cache_ops_t *cache);
+void gw_engine_destroy(gw_engine_t *);
+```
+
+**Consumers this buys:** RGW multisite (this design); a filesystem
+gateway fronting an S3/filesystem store (the AFM/ZGW shape — same
+library, different source backend); any store with a stat + range-fetch
+story. The cost is a real API boundary to keep stable, plus one level
+of indirection in the RGW integration — accepted, per D1: the engine
+is the reusable asset; the RGW hooks are the thin part.
+
+## 5. Where it lands in the RGW tree
 
 Integration points, in landing order:
 
 - **4a — Config scaffolding (first code on this branch).** Per-zone-pair
-  gateway config in the multisite period config: peer gateway endpoints,
-  transport preference, chunk size, enable flags, QoS caps. Surfaced via
+  gateway config in the multisite period config, surfaced via
   `radosgw-admin zonegroup modify` / `zone modify` alongside the existing
-  endpoint lists. No behavior change.
+  endpoint lists. No behavior change. Fields (the spec for the first
+  code commit):
+  - `gateway_endpoints`: per-zone list of gateway daemon endpoints,
+    mirroring how `RGWZone` carries `endpoints` today.
+  - `gateway_enabled` (bool, default false) per zone pair — the master
+    switch for 4b/4c.
+  - `gateway_transport`: `http | udp | rdma | auto` (default `http`
+    until 4b proves out).
+  - `gateway_port`: UDP listen port (default 19112, as measured).
+  - `gateway_chunk_size`: bytes (default 4 MiB, per D5).
+  - `gateway_qos_*`: token-bucket caps separating sync/tiering traffic
+    from the read-through priority class (§7).
 - **4b — Data-sync fetch path.** Multisite data sync already fetches
   object data from the source zone remotely
   (`src/rgw/driver/rados/rgw_data_sync.cc`,
@@ -129,7 +194,7 @@ Integration points, in landing order:
   served read-through instead of restore-only, reusing the cloud-tier
   manifest/head conventions.
 
-## 5. Wire protocol (transport v1)
+## 6. Wire protocol (transport v1)
 
 Evolved from the prototype (`bench/udp_transport.h` in the prototype
 repo), with its known debts fixed rather than carried:
@@ -147,7 +212,7 @@ repo), with its known debts fixed rather than carried:
   checksummed, resumable from a chunk bitmap, and idempotent per
   version.
 
-## 6. Cache design
+## 7. Cache design
 
 - Revalidation before serve: the serving side stats the source version
   (ETag) before serving a cached chunk set; a version change is a miss.
@@ -159,7 +224,7 @@ repo), with its known debts fixed rather than carried:
   the bulk scheduler (per-tenant/per-bucket token buckets); read-through
   is latency-bound, replication is not.
 
-## 7. Consistency rules
+## 8. Consistency rules
 
 - The gateway moves bytes for exactly one version at a time; version
   identity (version-id + ETag) travels with every chunk and is verified
@@ -174,7 +239,7 @@ repo), with its known debts fixed rather than carried:
   with data location pointing at the peer zone + gateway, mirroring
   cloud-tiered objects' local head.
 
-## 8. Security
+## 9. Security
 
 - Control plane: mTLS with per-zone certs, the multisite trust model.
 - Data plane: per-transfer AEAD (AES-GCM) chunk encryption, keys from
@@ -188,7 +253,7 @@ repo), with its known debts fixed rather than carried:
   bytes only against that token and makes no access decision of its
   own; cross-cluster IAM is not federated by the gateway.
 
-## 9. Failure behavior
+## 10. Failure behavior
 
 - Gateway or transport down → sync falls back to the HTTP fetch path;
   read-through disables itself; tiered reads fall back to
@@ -200,7 +265,7 @@ repo), with its known debts fixed rather than carried:
 - Split-brain is out of scope by construction: multisite's rules decide
   which version wins; the gateway moves the winner's bytes faster.
 
-## 10. Open questions
+## 11. Open questions
 
 - Cache substrate in-tree: dedicated pool + storage class (sketch) vs
   the D4N cache driver.
