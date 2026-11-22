@@ -4777,6 +4777,40 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
     conn = iter->second;
   }
 
+  // Gateway data plane (doc/rgw/rgw-rdma-gateway.md, phase 4b): when
+  // the source zone has the gateway enabled, fetch through its gateway
+  // daemon endpoints instead of the zone's RGW endpoints. The daemon
+  // speaks the same sync protocol, signs with the same system key, and
+  // owns the WAN transport and cache; any failure of a gateway attempt
+  // falls back to the direct zone connection in the retry loop below.
+  RGWRESTConn *direct_conn = conn;
+  std::unique_ptr<RGWRESTConn> gateway_conn;
+  if (!source_zone.empty()) {
+    const RGWZone *source = svc.zone->find_zone(source_zone);
+    if (source && source->gateway_config.enabled &&
+        !source->gateway_config.endpoints.empty()) {
+      gateway_conn = std::make_unique<RGWRESTConn>(
+          cct, source->id, source->gateway_config.endpoints,
+          svc.zone->get_zone_params().system_key,
+          svc.zone->get_zonegroup().get_id(),
+          svc.zone->get_zonegroup().api_name);
+      conn = gateway_conn.get();
+      ldpp_dout(rctx.dpp, 5) << "fetching " << fetched_obj
+          << " via the gateway endpoints of zone " << source_zone << dendl;
+    }
+  }
+
+  // declared here, before the first goto set_err_state below, which
+  // would otherwise jump over their initialization
+  bool via_gateway = (gateway_conn != nullptr);
+  auto drop_gateway = [&](const char *stage) {
+    ldpp_dout(rctx.dpp, 0) << "NOTICE: gateway fetch of " << fetched_obj
+        << " failed at " << stage << " (ret=" << ret
+        << "); falling back to the direct zone connection" << dendl;
+    via_gateway = false;
+    conn = direct_conn;
+  };
+
   boost::optional<RGWPutObj_Compress> compressor;
   CompressorRef plugin;
 
@@ -4887,12 +4921,20 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
                         sync_cloudtiered, true,
                         &cb, &in_stream_req);
     if (ret < 0) {
+      if (via_gateway) {
+        drop_gateway("get_obj");
+        continue;
+      }
       goto set_err_state;
     }
 
     ret = conn->complete_request(rctx.dpp, in_stream_req, &etag, &set_mtime,
                                  &accounted_size, nullptr, nullptr, rctx.y);
     if (ret < 0) {
+      if (via_gateway) {
+        drop_gateway("complete_request");
+        continue;
+      }
       if (ret == -ERR_INTERNAL_ERROR && tries < NUM_ENPOINT_IOERROR_RETRIES - 1) {
         ldpp_dout(rctx.dpp, 20) << __func__ << "(): failed to fetch " << fetched_obj
                                 << " from remote. retries=" << tries << dendl;
