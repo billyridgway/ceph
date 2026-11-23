@@ -1182,6 +1182,12 @@ class Object {
         /// If the object is multipart, the total number of multipart
         /// parts is assigned to this output parameter.
         std::optional<int> parts_count;
+
+        /// Gateway read-through (doc/rgw/rgw-rdma-gateway.md, phase
+        /// 4c): on a local miss, the driver may fetch the object from
+        /// the source zone's gateway before failing. Only drivers
+        /// with a gateway integration act on this; others ignore it.
+        bool gateway_read_through{false};
       } params;
 
       virtual ~ReadOp() = default;
