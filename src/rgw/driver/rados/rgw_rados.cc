@@ -4747,10 +4747,17 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
   ACLOwner owner;
   RGWAccessControlPolicy policy;
 
-  rgw::BlockingAioThrottle aio(cct->_conf->rgw_put_obj_min_window_size);
+  // Pick the throttle for the caller's context (rgw_aio_throttle.h):
+  // a blocking throttle deadlocks inside a coroutine once the object
+  // spans multiple stripes and the window fills, because the aio
+  // completions are posted to the same execution context that the
+  // blocked window wait stalls. Callers on plain threads (data sync)
+  // have no yield and get the blocking throttle, as before.
+  auto aio = rgw::make_throttle(cct->_conf->rgw_put_obj_min_window_size,
+                                rctx.y);
   using namespace rgw::putobj;
   jspan_context no_trace{false, false};
-  AtomicObjectProcessor processor(&aio, this, dest_bucket_info, nullptr,
+  AtomicObjectProcessor processor(aio.get(), this, dest_bucket_info, nullptr,
                                   owner, dest_obj_ctx, dest_obj, olh_epoch,
 				  tag, rctx.dpp, rctx.y, no_trace);
   RGWRESTConn *conn;
