@@ -4048,10 +4048,14 @@ int RadosObject::RadosReadOp::prepare(optional_yield y, const DoutPrefixProvider
   parent_op.params.attrs = &source->get_attrs();
 
   int ret = parent_op.prepare(y, dpp);
-  if (ret == -ENOENT && params.gateway_read_through) {
+  if (ret == -ENOENT && (params.gateway_read_through ||
+                         source->get_gateway_read_through_hint())) {
     // the object is not readable in this zone; try to pull it from
     // the source zone's gateway first (phase 4c). A failed fetch
-    // leaves the original miss untouched.
+    // leaves the original miss untouched. The object hint (set by
+    // the REST handler for data GETs) covers the early state load
+    // in read_permissions, which runs before the op's own prepare
+    // and is the first miss a multisite GET hits.
     if (gateway_read_through(dpp, y) == 0) {
       source->invalidate();
       ret = parent_op.prepare(y, dpp);
