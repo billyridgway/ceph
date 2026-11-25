@@ -2834,8 +2834,6 @@ void RGWGetObj::execute(optional_yield y)
   read_op->params.if_match = if_match;
   read_op->params.if_nomatch = if_nomatch;
   read_op->params.lastmod = &lastmod;
-  // gateway read-through applies to data GETs only, never to stat
-  read_op->params.gateway_read_through = (get_type() == RGW_OP_GET_OBJ && get_data);
   if (multipart_part_num) {
     read_op->params.part_num = &*multipart_part_num;
   }

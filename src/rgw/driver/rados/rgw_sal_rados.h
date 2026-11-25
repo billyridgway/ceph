@@ -514,9 +514,6 @@ class RadosObject : public StoreObject {
       RGWRados::Object op_target;
       RGWRados::Object::Read parent_op;
 
-      /// Gateway read-through fetch (phase 4c); see rgw_sal_rados.cc
-      int gateway_read_through(const DoutPrefixProvider* dpp, optional_yield y);
-
     public:
       RadosReadOp(RadosObject *_source, RGWObjectCtx *_rctx);
 

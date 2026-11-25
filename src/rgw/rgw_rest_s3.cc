@@ -5748,13 +5748,6 @@ RGWOp *RGWHandler_REST_Obj_S3::get_obj_op(bool get_data)
 {
   RGWGetObj_ObjStore_S3 *get_obj_op = new RGWGetObj_ObjStore_S3;
   get_obj_op->set_get_data(get_data);
-  if (get_data && s->object) {
-    // gateway read-through (phase 4c): mark the request object so a
-    // local miss may be fetched from the source zone's gateway. The
-    // hint must be set here, before read_permissions loads the object
-    // state -- that early load is the first miss a multisite GET hits.
-    s->object->set_gateway_read_through_hint(true);
-  }
   return get_obj_op;
 }
 

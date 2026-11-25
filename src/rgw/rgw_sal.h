@@ -1182,12 +1182,6 @@ class Object {
         /// If the object is multipart, the total number of multipart
         /// parts is assigned to this output parameter.
         std::optional<int> parts_count;
-
-        /// Gateway read-through (doc/rgw/rgw-rdma-gateway.md, phase
-        /// 4c): on a local miss, the driver may fetch the object from
-        /// the source zone's gateway before failing. Only drivers
-        /// with a gateway integration act on this; others ignore it.
-        bool gateway_read_through{false};
       } params;
 
       virtual ~ReadOp() = default;
@@ -1287,16 +1281,6 @@ class Object {
     /** Check if this object is atomic */
     virtual bool is_atomic() = 0;
     /** Pre-fetch data when reading */
-    /// Gateway read-through hint (doc/rgw/rgw-rdma-gateway.md, phase
-    /// 4c): set by the REST handler on the request's object for data
-    /// GETs (never stat/HEAD). Drivers with a gateway integration may
-    /// fetch the object from the source zone's gateway on a local
-    /// miss -- including the early state load in read_permissions,
-    /// which runs before the op's own prepare. Other drivers and
-    /// other ops ignore it.
-    bool gateway_read_through_hint{false};
-    void set_gateway_read_through_hint(bool v) { gateway_read_through_hint = v; }
-    bool get_gateway_read_through_hint() const { return gateway_read_through_hint; }
     virtual void set_prefetch_data() = 0;
     /** Check if this object should prefetch */
     virtual bool is_prefetch_data() = 0;

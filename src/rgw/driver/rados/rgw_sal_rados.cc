@@ -3970,61 +3970,6 @@ RadosObject::RadosReadOp::RadosReadOp(RadosObject *_source, RGWObjectCtx *_octx)
 	parent_op(&op_target)
 { }
 
-// Gateway read-through (doc/rgw/rgw-rdma-gateway.md, phase 4c): the
-// object's data is not in this zone yet, but the zonegroup knows the
-// object. If the zonegroup's master zone has the gateway enabled,
-// pull the object from that zone now -- RGWRados::fetch_remote_obj
-// routes the fetch through the gateway daemon (phase 4b) -- so the
-// pending GET can be served locally and later reads stay local. The
-// fetched copy is an ordinary local replica, written by the same code
-// data sync uses. Returns 0 only if the object was fetched; any other
-// result leaves the caller with its original local miss, so the
-// gateway is never a side channel around multisite consistency: it
-// can only serve a version the source zone actually has.
-int RadosObject::RadosReadOp::gateway_read_through(const DoutPrefixProvider* dpp,
-                                                   optional_yield y)
-{
-  if (!source->get_bucket()) {
-    return -ENOENT;
-  }
-  RadosStore *store = source->store;
-  RGWRados *rados = store->getRados();
-  RGWBucketInfo dest_bucket_info = source->get_bucket()->get_info();
-
-  auto *zone_svc = rados->svc.zone;
-  const RGWZoneGroup& zonegroup = zone_svc->get_zonegroup();
-  if (!dest_bucket_info.zonegroup.empty() &&
-      dest_bucket_info.zonegroup != zonegroup.get_id()) {
-    return -ENOENT; // other zonegroups are out of scope for the POC
-  }
-  const rgw_zone_id& source_zone = zonegroup.master_zone;
-  if (source_zone.empty() || source_zone == zone_svc->get_zone().id) {
-    return -ENOENT; // this zone is the source; the data is simply absent
-  }
-  const RGWZone *source_zone_cfg = zone_svc->find_zone(source_zone);
-  if (!source_zone_cfg || !source_zone_cfg->gateway_config.enabled ||
-      source_zone_cfg->gateway_config.endpoints.empty()) {
-    return -ENOENT;
-  }
-
-  ldpp_dout(dpp, 5) << "gateway read-through: fetching " << source->get_obj()
-                    << " from zone " << source_zone << dendl;
-
-  RGWObjectCtx obj_ctx(store);
-  rgw::sal::Attrs attrs;
-  const req_context rctx{dpp, y, nullptr};
-  const rgw_obj& obj = source->get_obj();
-  return rados->fetch_remote_obj(obj_ctx, nullptr, nullptr, nullptr,
-                                 source_zone, obj, obj, dest_bucket_info,
-                                 nullptr, std::nullopt, nullptr, nullptr,
-                                 nullptr, nullptr, false, nullptr, nullptr,
-                                 RGWRados::ATTRSMOD_NONE, false, attrs,
-                                 RGWObjCategory::Main, std::nullopt,
-                                 ceph::real_time(), nullptr, nullptr,
-                                 nullptr, nullptr, rctx, nullptr, true,
-                                 obj, std::nullopt);
-}
-
 int RadosObject::RadosReadOp::prepare(optional_yield y, const DoutPrefixProvider* dpp)
 {
   uint64_t obj_size;
@@ -4048,19 +3993,6 @@ int RadosObject::RadosReadOp::prepare(optional_yield y, const DoutPrefixProvider
   parent_op.params.attrs = &source->get_attrs();
 
   int ret = parent_op.prepare(y, dpp);
-  if (ret == -ENOENT && (params.gateway_read_through ||
-                         source->get_gateway_read_through_hint())) {
-    // the object is not readable in this zone; try to pull it from
-    // the source zone's gateway first (phase 4c). A failed fetch
-    // leaves the original miss untouched. The object hint (set by
-    // the REST handler for data GETs) covers the early state load
-    // in read_permissions, which runs before the op's own prepare
-    // and is the first miss a multisite GET hits.
-    if (gateway_read_through(dpp, y) == 0) {
-      source->invalidate();
-      ret = parent_op.prepare(y, dpp);
-    }
-  }
   if (ret < 0)
     return ret;
 
