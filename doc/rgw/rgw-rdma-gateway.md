@@ -1,279 +1,242 @@
-# RGW gateway: RDMA-semantics transport and read-through cache for multisite
+# RGW long-haul gateway: WAN transport acceleration for multisite
 
-Status: design for a proof-of-concept branch, Nov 22, 2026.
+Status: refactored design, Nov 25, 2026, following an implementation
+review of the original proof-of-concept branch.
 Branch: `wridgway/rgw-rdma-gateway` (billyridgway/ceph).
-Prototype and measurements: github.com/billyridgway/rgw-rdma-gateway
-(`bench/RESULTS.md` there is the evidence base for every number below).
-Revised Nov 22, 2026: the engine is factored as a standalone library
-(§4); the RGW tree carries only the consumer side (§5).
+Standalone gateway and transport: github.com/billyridgway/rgw-rdma-gateway
+(measurements in `bench/RESULTS.md` there).
 
-## 1. Summary
+## 1. Objective and non-goals
 
-Add a paired-gateway data plane to RGW multisite, in the shape of
-Vcinity-style gateway products but built from RGW's own machinery:
+Improve object storage data movement over long-haul, high-latency,
+congested networks for:
 
-- A **read-through cache**: a GET (or a sync fetch) for an object version
-  whose metadata is local but whose data lives in a peer zone is served by
-  streaming chunks from the peer zone's gateway, populating a local cache
-  so later reads never cross the WAN.
-- A **windowed, loss-tolerant transport** between paired gateways for the
-  WAN leg: RDMA *semantics* (large sliding window, selective
-  retransmission, no congestion backoff) over ordinary UDP on a
-  configurable port, with HTTP as the always-available fallback and real
-  RDMA (verbs/rsockets) as a later transport where the fabric allows it.
+- RGW multisite asynchronous replication.
+- RGW's existing read-through cache functionality (the D4N cache
+  driver), whose data arrives through the multisite fetch machinery.
+- Potential future consumers (ZGW, GPFS AFM) of the standalone
+  transport engine.
 
-RGW remains the system of record at both ends. The gateway moves bytes
-for versions that RGW's metadata sync already knows about; it originates
-no metadata, makes no access decisions, and degrades to today's HTTP
-sync when it is unavailable.
+Non-goals, explicitly: no new storage tiering semantics, no change to
+multisite consistency guarantees, no redesign of lifecycle
+management, no on-demand replication on the GET path. The guiding
+principle is to improve WAN data movement without changing existing
+object storage semantics, with the smallest possible Ceph
+integration, concentrating effort on the transport.
 
-## 2. What the prototype measured (and what it changed)
+## 2. Architecture
 
-Test link: two hosts, 24.6 ms RTT, ~1.1 Gbps ceiling. All payloads
-SHA-256-verified end to end.
+The gateway is a site-local, standalone service deployed in pairs:
 
-- **Transport, clean link:** custom reliable UDP ties tuned TCP at
-  64 MiB (0.90 vs 0.88 Gbps) and trails ~13% at 1 GiB (0.99 vs
-  1.12 Gbps). Whole-object 256 MiB: HTTP 2.45 s, HTTPS 2.78 s,
-  gateway-UDP 3.44 s. *The custom protocol is not faster than HTTPS on a
-  clean link*, and it is the most CPU-hungry option (~2 s server CPU per
-  256 MiB vs ~1 s for nginx TLS — per-packet syscalls plus the
-  prototype's extra user-space hop).
-- **Transport, 1% packet loss:** HTTPS collapses to 293.9 s for
-  256 MiB; the windowed transport holds 5.4 s (~54x). TCP reads loss as
-  congestion and backs off; between two gateways on an operator-owned
-  link, loss is weather, not a congestion signal. *This regime — lossy
-  long-haul WAN — is where the transport earns its keep.*
-- **RoCE v2 is not assumable:** UDP 4791 is filtered on the prototype's
-  provider path while general UDP passes. Any design that requires
-  stock RoCE across a WAN is dead on arrival; the transport must run on
-  an arbitrary port, with real RDMA reserved for fabrics that offer it.
-- **The cache is the largest win:** warm hits served 64 MiB in 0.16 s
-  (~9x vs direct) and 256 MiB in 0.35 s (~17x); cold misses stream
-  through at ~direct speed. ETag revalidation (STAT before serve) never
-  served a stale byte across a version change.
-- **Pipelining is not optional:** connection-per-chunk fetching measured
-  21.3 s for a cold 256 MiB read where the pipelined design (persistent
-  peer connection, chunk requests pipelined 8-deep, stream-through
-  delivery) measures 3.0 s at the same chunk size. With pipelining,
-  chunk size nearly stops mattering for sequential reads (2.9–3.8 s
-  across 1–64 MiB chunks).
-- **Chunk size is a sparse-access knob:** wire amplification for sparse
-  reads tracks chunk size (1.1x / 4.5x / 18x / 40x at 1 / 4 / 16 /
-  64 MiB). 4 MiB is the balanced default.
-- **Synchronous prefetch does not work:** it measured *slower* than no
-  prefetch (1.92 s vs 1.73 s) because the fetch happens inside the
-  current request. Prefetch requires an asynchronous fetcher or none.
-- **RGW is a good citizen as a source:** 1 MiB range GETs answer in
-  6–9 ms, offset-independent, byte-exact. Gateway vs an RGW source:
-  cold 256 MiB 3.48 s at 4 MiB chunks, warm 0.41 s, sparse 1.22 s —
-  the transport-floor class, ~25x faster than against a source whose
-  ranges are expensive.
-
-## 3. Design decisions
-
-- **D1 — Cache first, transport second.** Read-through caching is the
-  headline feature and ships value on any transport, including HTTP.
-  The custom transport is the WAN-leg upgrade for lossy links, not the
-  product.
-- **D2 — Pluggable transport, one fetch interface.** HTTP (existing,
-  permanent fallback), windowed reliable UDP on a configurable port
-  (the measured transport), RDMA verbs/rsockets later where available.
-  Nothing in the design may assume UDP 4791 is routable.
-- **D3 — Loss policy is explicit.** No congestion backoff between paired
-  gateways; SACK-based repair; large window. Pacing is configurable,
-  and the fairness trade (a non-backing-off flow is unfair on shared
-  links) is documented at the config surface, not buried.
-- **D4 — Pipelining is part of the protocol contract.** Persistent peer
-  connections, pipelined chunk requests, stream-through delivery.
-  Connection-per-chunk is prohibited by design (measured ~7x worse).
-- **D5 — Chunk size 4 MiB default**, configurable per zone pair; chosen
-  for sparse amplification and cache granularity, not throughput.
-- **D6 — No synchronous prefetch.** An async fetcher is a separate,
-  later component; v1 omits prefetch entirely.
-- **D7 — A library, hosted two ways.** The engine (transport +
-  fetch/cache) is a standalone library (§4), not RGW code. RGW hosts it
-  in a daemon paired 1:1 with a zone's RGWs — isolating transport
-  crashes from S3 serving and keeping driver/UDP code out of the
-  radosgw process — and links only a thin client. Other software may
-  link the library directly. The daemon serves bytes only against
-  scoped tokens (see Security); in the POC its source backend reads the
-  local RGW's S3 with sync credentials, as the prototype did.
-
-## 4. The library factoring
-
-The engine is a standalone library (working name **libgwengine**),
-developed in the prototype repo; the Ceph tree contains only the
-consumer side. The prototype already sits on this boundary — the
-transport header and the gateway have no Ceph dependencies — so the
-factoring formalizes a line that exists rather than inventing one.
-
-**In the library:**
-
-- The windowed reliable-UDP transport (§6), behind a transport
-  interface that also admits HTTP and, later, RDMA verbs under the
-  same fetch calls.
-- The fetch/cache engine: chunk addressing by (object, version,
-  range), pipelined fetching, stream-through delivery, STAT/ETag
-  revalidation, LRU eviction.
-- Scoped-token *verification*: signature, scope, and expiry are
-  checked before bytes move.
-
-**Interfaces the host provides:**
-
-- *Source backend* (serve side): `stat(object) -> version/ETag` and
-  `fetch(object, version, range) -> bytes`. RGW's daemon implements it
-  over the local zone (S3 in the POC, SAL later); a filesystem gateway
-  implements it over files; each host maps its own store.
-- *Cache backend*: chunk get/put/evict. A disk implementation ships
-  with the library; hosts may substitute their own store.
-- *Token issuance and all access decisions stay with the host.* The
-  library verifies tokens; it never issues them and never decides who
-  may read what.
-
-**API sketch** (indicative; a C surface, for embeddability):
-
-```c
-gw_engine_t *gw_engine_create(const gw_config_t *cfg);
-int  gw_stat (gw_engine_t *, const gw_peer_t *, const gw_obj_t *,
-              const gw_token_t *, gw_version_t *out);
-int  gw_fetch(gw_engine_t *, const gw_peer_t *, const gw_obj_t *,
-              const gw_version_t *, gw_range_t,
-              const gw_token_t *, gw_sink_t *sink);   /* streams */
-int  gw_serve(gw_engine_t *, const gw_source_ops_t *src,
-              const gw_cache_ops_t *cache);
-void gw_engine_destroy(gw_engine_t *);
+```
+Site A RGW ---- local HTTP ---- Site A Gateway
+                                     |
+                              optimized WAN transport
+                                     |
+Site B RGW ---- local HTTP ---- Site B Gateway
 ```
 
-**Consumers this buys:** RGW multisite (this design); a filesystem
-gateway fronting an S3/filesystem store (the AFM/ZGW shape — same
-library, different source backend); any store with a stat + range-fetch
-story. The cost is a real API boundary to keep stable, plus one level
-of indirection in the RGW integration — accepted, per D1: the engine
-is the reusable asset; the RGW hooks are the thin part.
+Only the gateway-to-gateway connection traverses the WAN. In its
+preferred form the gateway pair is a transport-level tunnel: it
+carries RGW's HTTP byte streams without terminating them, so SigV4
+signatures, Host headers, multisite `rgwx-*` parameters, object
+metadata, and (where configured) TLS all remain end to end between
+the RGWs. RGW authorization decisions are untouched; the gateway
+never sees a credential it could use and cannot mint one; a client
+request cannot trigger a privileged transfer, because gateways only
+carry connections RGW itself opened.
 
-## 5. Where it lands in the RGW tree
+Two consumers need no Ceph change at all:
 
-Integration points, in landing order:
+- **Cloud-S3 tiering / restore.** The tier endpoint is already an
+  operator-configured URL; pointing it at the local gateway inserts
+  the gateway pair into the restore path with existing semantics
+  intact.
+- **Any HTTP client of a remote RGW/S3 endpoint** (including future
+  ZGW/AFM consumers) can be routed the same way.
 
-- **4a — Config scaffolding (first code on this branch).** Per-zone-pair
-  gateway config in the multisite period config, surfaced via
-  `radosgw-admin zonegroup modify` / `zone modify` alongside the existing
-  endpoint lists. No behavior change. Fields (the spec for the first
-  code commit):
-  - `gateway_endpoints`: per-zone list of gateway daemon endpoints,
-    mirroring how `RGWZone` carries `endpoints` today.
-  - `gateway_enabled` (bool, default false) per zone pair — the master
-    switch for 4b/4c.
-  - `gateway_transport`: `http | udp | rdma | auto` (default `http`
-    until 4b proves out).
-  - `gateway_port`: UDP listen port (default 19112, as measured).
-  - `gateway_chunk_size`: bytes (default 4 MiB, per D5).
-  - `gateway_qos_*`: token-bucket caps separating sync/tiering traffic
-    from the read-through priority class (§7).
-- **4b — Data-sync fetch path.** Multisite data sync already fetches
-  object data from the source zone remotely
-  (`src/rgw/driver/rados/rgw_data_sync.cc`,
-  `RGWRados::fetch_remote_obj` in `src/rgw/driver/rados/rgw_rados.cc`,
-  over the REST client in `src/rgw/rgw_rest_client.cc`). Behind a config
-  flag, the fetch goes through the gateway client instead of HTTP; any
-  gateway failure falls back to the HTTP fetch. No client-visible
-  semantics change — this is the safest first code, because sync already
-  has the "fetch this version from that zone" shape.
-- **4c — Read-through on the GET path.** In `RGWGetObj::execute`
-  (`src/rgw/rgw_op.cc`): metadata present, data absent locally → fetch
-  via the gateway client, stream to the client, populate the cache.
-  Cache placement follows the original sketch: a dedicated pool fronted
-  by a storage class so placement is visible in the object manifest;
-  the POC may start with the daemon's disk cache as prototyped. Whether
-  the D4N cache driver (`src/rgw/driver/d4n`) is the right in-tree cache
-  substrate is an open question below.
-- **4d — Tier target.** A peer zone registered as a lifecycle tier
-  target (`src/rgw/driver/rados/rgw_lc_tier.cc`), except transitions
-  move data over the gateway transport and reads of tiered objects are
-  served read-through instead of restore-only, reusing the cloud-tier
-  manifest/head conventions.
+Multisite replication is the one consumer whose destination is not a
+free-form URL: RGW dials the source zone's endpoint from the period,
+and zone endpoints are the zone's identity, not a routing knob. For
+multisite there are two options:
 
-## 6. Wire protocol (transport v1)
+- **Deployment routing** (zero Ceph diff): the peer endpoint is
+  reachable via the gateway pair at the network level.
+- **The minimal native hook** (implemented on this branch, §3): RGW
+  connects to its *local* gateway, which routes by destination zone
+  identity.
 
-Evolved from the prototype (`bench/udp_transport.h` in the prototype
-repo), with its known debts fixed rather than carried:
+## 3. What this branch implements
 
-- Datagram stream on a configurable UDP port; 1,400-byte prototype
-  packets become MTU-sized datagrams; 8,192-packet sliding window;
-  cumulative ACK + 64-bit SACK bitmap; retransmit holes only.
-- **RTT-estimated RTO** (the prototype's fixed 25 ms RTO is a measured
-  tail-latency debt at small sizes — do not ship it).
-- **Batched syscalls** (`sendmmsg`/`recvmmsg`) — per-packet syscalls
-  were the prototype's CPU ceiling.
-- **Explicit FIN handshake** — the prototype's drain-on-close is a
-  stand-in, not a protocol.
-- Transfers are (bucket, key, version-id, range) addressed, per-chunk
-  checksummed, resumable from a chunk bitmap, and idempotent per
-  version.
+Exactly three things:
 
-## 7. Cache design
+1. **Minimal gateway configuration on RGWZone**
+   (`RGWZoneGatewayConfig` in the period): `enabled` plus the zone's
+   **local gateway endpoints**. Nothing transport-specific is in RGW
+   configuration: wire protocol, ports, chunking, and QoS belong to
+   the gateway service, and changing them does not commit a new
+   period. Set via `radosgw-admin --gateway-enabled` /
+   `--gateway-endpoints` on zone create/modify and zonegroup add.
+   The binary/JSON period encoding stays able to read the earlier
+   POC layout (extra fields are read and dropped / ignored).
 
-- Revalidation before serve: the serving side stats the source version
-  (ETag) before serving a cached chunk set; a version change is a miss.
-  A cached copy is *never* authoritative.
-- Eviction is LRU over whole objects in the POC (range-level eviction
-  is a later refinement); invalidation also arrives via mdlog on
-  overwrite/delete.
-- Read-through traffic has strict priority over sync/tiering traffic in
-  the bulk scheduler (per-tenant/per-bucket token buckets); read-through
-  is latency-bound, replication is not.
+2. **Gateway routing inside `RGWRados::fetch_remote_obj`** — the
+   existing multisite fetch primitive used by data sync
+   (`RGWFetchRemoteObjCR`) and cross-zone CopyObj. When the local
+   zone has a gateway configured, the zone service builds one gateway
+   connection per source zone alongside the direct zone connections
+   (`RGWSI_Zone::gateway_conn_map`), addressed to the local gateway
+   endpoints and carrying the source zone's identity; fetches use it
+   instead of the direct connection. The wire protocol is the
+   ordinary sync protocol with the usual system key. Replication
+   traffic uses the gateway as transport only: nothing is cached or
+   stored twice, and bytes land in RADOS exactly as a direct fetch
+   would put them. Metadata sync, data-log processing, version
+   selection, conflict resolution, sync policies, checkpoints, and
+   delete handling are all unchanged — they never reach this code.
 
-## 8. Consistency rules
+   Failure handling is classified (helpers above `fetch_remote_obj`):
+   - *Transport-class* failures (connect/reset/timeout/EIO/...):
+     fall back once to the direct zone connection and back the
+     gateway off for that source zone
+     (`rgw_gateway_failure_backoff_secs`, default 30) so a dead
+     gateway is not retried on every object. Note, from rig testing:
+     the REST layer surfaces some path failures (e.g. a refused
+     connection to a dead gateway) as an internal error at
+     `complete_request` rather than as a transport errno; those take
+     the server-error path below — fallback without backoff — so a
+     dead gateway costs one fast-failing attempt per fetch until a
+     success or a true transport errno changes the state.
+   - *Server errors* (503 / internal error): may fall back, never
+     mark the gateway unhealthy — either end may have produced them.
+   - *Application-level answers* (404, 403, 401, 400, 304, ...):
+     propagate unchanged. They are the source zone's answer, not a
+     path failure.
+   - The fallback can be disabled (`rgw_gateway_fallback_direct`,
+     default true) to make the gateway mandatory.
+   - A `complete_request` failure after a full transfer is safe to
+     retry: the fetch writes through a temporary object and completes
+     atomically, so a re-fetch restarts cleanly; the cost is a
+     repeated WAN transfer, which the classification above bounds to
+     a single fallback.
 
-- The gateway moves bytes for exactly one version at a time; version
-  identity (version-id + ETag) travels with every chunk and is verified
-  on completion.
-- Deletes and overwrites propagate only through mdlog/bilog as today;
-  the gateway never originates a metadata change.
-- Read-through may serve a version only if local metadata already
-  reflects it. If metadata sync has not arrived, the GET is a normal
-  local miss — the gateway is not a side channel around eventual
-  consistency.
-- Tiered-remote objects keep their index entry and manifest locally,
-  with data location pointing at the peer zone + gateway, mirroring
-  cloud-tiered objects' local head.
+3. **An independent coroutine throttle fix** in `fetch_remote_obj`:
+   use `rgw::make_throttle(window, rctx.y)` instead of an
+   unconditional `BlockingAioThrottle`. With a coroutine caller, a
+   blocking throttle deadlocks once a multi-stripe object fills the
+   window, because librados completions post to the very context the
+   blocking wait stalls (root-caused with gdb; reproduced with
+   objects >= 8 MiB, which hung indefinitely, and verified fixed at
+   8/32/256 MiB). This stands alone from the gateway work — cross-zone
+   CopyObj passes a real yield and hits the same latent deadlock —
+   and is a plausible upstream patch in its own right.
 
-## 9. Security
+## 4. What was removed, and why
 
-- Control plane: mTLS with per-zone certs, the multisite trust model.
-- Data plane: per-transfer AEAD (AES-GCM) chunk encryption, keys from
-  the control channel, rotated per session; packet sequence numbers as
-  nonces. Do not assume link encryption — RoCE provides none either.
-  (The prototype ran plaintext UDP between two test hosts; that was a
-  benchmarking shortcut, not the design.)
-- Fetch authorization: every fetch carries a short-lived token scoped
-  to bucket + key + version + range, issued by the requesting zone's
-  RGW after it authorizes the original request. The peer gateway serves
-  bytes only against that token and makes no access decision of its
-  own; cross-cluster IAM is not federated by the gateway.
+The original POC branch carried two features the review rejected;
+both are removed in full, and the branch's remaining diff is only §3:
 
-## 10. Failure behavior
+- **Peer-zone lifecycle tiering** (a new `peer-zone` tier type with
+  manifest, placement, lifecycle transition/restore, and copy
+  changes). A new tier type is not necessary to accelerate existing
+  remote operations; the existing cloud-S3 tier path (§2) covers the
+  tiering consumer with zero semantic change.
+- **GET-path multisite read-through** (on a local miss, fetch the
+  whole object from the master zone, persist it in RADOS, then serve
+  the GET; triggered from the REST handler via a SAL hint). That is
+  on-demand replication, not acceleration of RGW's existing
+  read-through cache: it fires before authorization completes and it
+  assumes the master zone is authoritative. RGW's existing
+  read-through cache is the **D4N** SAL filter driver
+  (`rgw_filter=d4n`): an L1 block cache with version-pinned blocks
+  over the Rados driver, whose misses drain from the wrapped store —
+  i.e. through the same multisite fetch machinery §3 accelerates.
+  Known upstream limitation, documented rather than absorbed: D4N's
+  block directory carries a `// TODO: Retrieve remotely` for blocks
+  held by another cache host.
 
-- Gateway or transport down → sync falls back to the HTTP fetch path;
-  read-through disables itself; tiered reads fall back to
-  restore-over-HTTP. Degradation is visible in zone status, never
-  silent.
-- Partial transfer → chunk bitmap persists with the sync marker; resume
-  on reconnect. A version whose data never completes stays in the
-  existing "sync pending" state.
-- Split-brain is out of scope by construction: multisite's rules decide
-  which version wins; the gateway moves the winner's bytes faster.
+## 5. The standalone transport engine (primary contribution)
 
-## 11. Open questions
+The windowed reliable-UDP transport and the tunnel that carries TCP
+streams over it live in the standalone repository, independent of
+Ceph, consumable by RGW (via the gateway), ZGW, and AFM alike. The
+prototype demonstrated the loss-resilience signature on one link
+profile (25 ms RTT, 1 Gbps, random loss): transfers stayed ~flat
+from 0% to 1% loss while TCP relays collapsed (~37x at 1% loss for
+256 MiB).
 
-- Cache substrate in-tree: dedicated pool + storage class (sketch) vs
-  the D4N cache driver.
-- Daemon packaging: a mode of radosgw vs a separate daemon under
-  cephadm/orch; the POC keeps the prototype's standalone daemon.
-- Pacing defaults on shared links (D3's fairness trade made concrete).
-- Whether an async fetcher (D6) earns its complexity after 4c
-  measurements.
-- Per-bucket / sync-policy opt-in granularity: data sharing is an
-  explicit per-bucket or per-zone-pair choice, never a zonegroup-wide
-  default.
+It is not yet demonstrated to be good transport, and this design
+does not claim otherwise. The prototype has a fixed RTO with no RTT
+estimation, no congestion control (an external pacing gate had to be
+added during testing to stop its window from overfilling an in-RTT
+queue — the prototype can be antisocial and self-defeating without
+one), a single connection per pair, and no fairness story. Before
+further custom-UDP investment, the alternatives get benchmarked on
+the same rig: kernel TCP with BBR, tuned CUBIC, parallel TCP
+streams, and a QUIC tunnel. The custom transport earns its place
+only if it beats those under the controlled matrix (bandwidth
+1/10/25 Gbps where infrastructure permits; RTT 25/50/100/200 ms;
+loss 0/0.01/0.1/1%, random and burst; competing traffic; concurrent
+transfers; full and sparse range reads; goodput, completion time,
+TTFB, p95/p99, retransmitted bytes, CPU, memory, fairness,
+replication backlog recovery, integrity). Caching is disabled for
+transport comparisons; caching benefits are benchmarked separately.
+
+If the transport earns its place, the hardening list is: adaptive
+RTT estimation and RTO, pacing, congestion-aware flow control,
+BDP-aware windows, selective retransmission, efficient
+acknowledgments, burst-loss recovery, fairness to competing traffic,
+batching, concurrent connections, bounded memory, backpressure, and
+connection reuse with cancellation/recovery.
+
+## 6. Caching
+
+There is no gateway cache in the RGW path: replication is
+transport-only by default, and RGW's own caches (D4N, cloud restore)
+keep their semantics with the transport underneath. The standalone
+repository's caching gateway (built for the original prototype) is a
+separate component for consumers that want it, with a known defect
+to fix before any reliance: chunk fetches are not pinned to the
+version the initial STAT returned, so an object changing between
+STAT and FETCH could assemble chunks from two versions. The
+acceptance bar for that component: immutable version pinning with
+conditional chunk fetches and abort-on-mismatch, collision-resistant
+cache identities, tenant/bucket isolation, request coalescing,
+atomic publication, bounded eviction, per-chunk integrity.
+
+## 7. Security
+
+Current state, plainly: the prototype gateway and tunnel run
+plaintext with no authentication — acceptable between two benchmark
+hosts, disqualifying for production traffic. Requirements before any
+production use:
+
+- Mutual authentication between gateway pairs, with encryption and
+  integrity on the WAN leg and replay protection (the design intent
+  is an mTLS control plane with per-transfer AEAD keys).
+- Under the tunnel model, RGW's own SigV4 (and TLS, if configured)
+  stays end to end; the gateway holds no RGW credentials and the
+  multisite system key never leaves the RGWs. If a future gateway
+  mode terminates application-layer security instead of carrying it,
+  the added trust must be documented explicitly.
+- Resource-consumption limits on the gateway itself (unauthenticated
+  traffic must not be able to exhaust it).
+
+## 8. Validation status
+
+- The §3.2 routing was runtime-proven in its earlier form on a
+  two-VM rig (two vstart clusters, real cross-cluster multisite,
+  shaped 25 ms / 1 Gbps links): sync and fetches carried over the UDP
+  tunnel, byte-exact at 256 MiB across the loss matrix. The
+  refactored form was re-verified on the same rig on Nov 25, 2026:
+  the new build (397/397 steps) read a period written by the old
+  build without error; a fresh object's immediate GET on the
+  secondary returned 404 (no on-demand fetch — §4's removal behaving
+  as stock); 1 MiB and 32 MiB objects then synced byte-exact through
+  the secondary's local gateway endpoint (log: "via this zone's
+  local gateway"); with the gateway killed, the next objects still
+  landed byte-exact via the classified fallback (NOTICE logged), and
+  gateway sync resumed when the gateway returned.
+- The §3.3 throttle fix is rig-proven as described.
+- The §5 congestion objective is **not** established; §5's matrix is
+  the gate for any such claim.
