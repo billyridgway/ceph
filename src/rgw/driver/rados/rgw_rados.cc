@@ -4693,6 +4693,39 @@ int RGWFetchObjFilter_Default::filter(CephContext *cct,
   return 0;
 }
 
+// Error classification for fetches routed through the local gateway
+// (see fetch_remote_obj). Transport-class failures indict the path
+// (this gateway, the WAN leg, or the far gateway), so they may fall
+// back to the direct zone connection and mark the gateway unhealthy.
+// Server errors are ambiguous -- the gateway or the source zone may
+// have produced them -- so they may fall back but never mark health.
+// Everything else is an application-level answer from the source zone
+// (object not found, access denied, not modified, ...) and must
+// propagate to the caller unchanged: it is the source's answer, not a
+// path failure, and retrying it on another path would only repeat it.
+static bool gw_fetch_transport_error(int ret)
+{
+  switch (ret) {
+    case -ECONNREFUSED:
+    case -ECONNRESET:
+    case -ECONNABORTED:
+    case -ETIMEDOUT:
+    case -EIO:
+    case -ENOTCONN:
+    case -EPIPE:
+    case -EHOSTUNREACH:
+    case -ENETUNREACH:
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool gw_fetch_server_error(int ret)
+{
+  return ret == -EBUSY || ret == -ERR_INTERNAL_ERROR;
+}
+
 int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
                const rgw_owner* user_id,
                const rgw_user* perm_check_uid,
@@ -4784,38 +4817,58 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
     conn = iter->second;
   }
 
-  // Gateway data plane (doc/rgw/rgw-rdma-gateway.md, phase 4b): when
-  // the source zone has the gateway enabled, fetch through its gateway
-  // daemon endpoints instead of the zone's RGW endpoints. The daemon
-  // speaks the same sync protocol, signs with the same system key, and
-  // owns the WAN transport and cache; any failure of a gateway attempt
-  // falls back to the direct zone connection in the retry loop below.
+  // Long-haul gateway (doc/rgw/rgw-rdma-gateway.md): when this zone
+  // has a local gateway configured, the zone service holds a gateway
+  // connection per source zone (alongside the direct zone
+  // connections), addressed to THIS zone's gateway endpoints. The
+  // RGW's connection therefore never traverses the WAN itself; the
+  // gateway pair owns the long-haul leg and routes by the destination
+  // zone identity the connection carries. The wire protocol is the
+  // ordinary sync protocol with the usual system key, so the source
+  // zone cannot tell a gateway is in the path, and no data is cached
+  // or stored twice: bytes land in RADOS exactly as a direct fetch
+  // would put them. Replication traffic uses the gateway as transport
+  // only.
+  //
+  // Failure handling in the retry loop below is classified: only
+  // transport-class failures (and gateway-side server errors) fall
+  // back to the direct zone connection, once; application-level
+  // answers from the source zone (not found, access denied, ...)
+  // propagate unchanged. A transport failure also backs the gateway
+  // off for that source zone (rgw_gateway_failure_backoff_secs) so a
+  // dead gateway is not retried on every object, and the fallback
+  // itself can be disabled (rgw_gateway_fallback_direct) to make the
+  // gateway mandatory.
   RGWRESTConn *direct_conn = conn;
-  std::unique_ptr<RGWRESTConn> gateway_conn;
+  RGWRESTConn *gateway_conn = nullptr;
+  bool via_gateway = false;
   if (!source_zone.empty()) {
-    const RGWZone *source = svc.zone->find_zone(source_zone);
-    if (source && source->gateway_config.enabled &&
-        !source->gateway_config.endpoints.empty()) {
-      gateway_conn = std::make_unique<RGWRESTConn>(
-          cct, source->id, source->gateway_config.endpoints,
-          svc.zone->get_zone_params().system_key,
-          svc.zone->get_zonegroup().get_id(),
-          svc.zone->get_zonegroup().api_name);
-      conn = gateway_conn.get();
+    gateway_conn = svc.zone->get_gateway_conn(source_zone);
+    if (gateway_conn && svc.zone->gateway_conn_usable(source_zone)) {
+      via_gateway = true;
+      conn = gateway_conn;
       ldpp_dout(rctx.dpp, 5) << "fetching " << fetched_obj
-          << " via the gateway endpoints of zone " << source_zone << dendl;
+          << " via this zone's local gateway (source zone "
+          << source_zone << ")" << dendl;
     }
   }
 
   // declared here, before the first goto set_err_state below, which
   // would otherwise jump over their initialization
-  bool via_gateway = (gateway_conn != nullptr);
-  auto drop_gateway = [&](const char *stage) {
+  auto drop_gateway = [&](const char *stage, bool mark_unhealthy) {
+    if (!cct->_conf->rgw_gateway_fallback_direct) {
+      return false;
+    }
     ldpp_dout(rctx.dpp, 0) << "NOTICE: gateway fetch of " << fetched_obj
         << " failed at " << stage << " (ret=" << ret
         << "); falling back to the direct zone connection" << dendl;
+    if (mark_unhealthy) {
+      svc.zone->note_gateway_failure(
+          source_zone, cct->_conf->rgw_gateway_failure_backoff_secs);
+    }
     via_gateway = false;
     conn = direct_conn;
+    return true;
   };
 
   boost::optional<RGWPutObj_Compress> compressor;
@@ -4928,8 +4981,11 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
                         sync_cloudtiered, true,
                         &cb, &in_stream_req);
     if (ret < 0) {
-      if (via_gateway) {
-        drop_gateway("get_obj");
+      if (via_gateway &&
+          ((gw_fetch_transport_error(ret) &&
+            drop_gateway("get_obj", true)) ||
+           (gw_fetch_server_error(ret) &&
+            drop_gateway("get_obj", false)))) {
         continue;
       }
       goto set_err_state;
@@ -4938,8 +4994,11 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
     ret = conn->complete_request(rctx.dpp, in_stream_req, &etag, &set_mtime,
                                  &accounted_size, nullptr, nullptr, rctx.y);
     if (ret < 0) {
-      if (via_gateway) {
-        drop_gateway("complete_request");
+      if (via_gateway &&
+          ((gw_fetch_transport_error(ret) &&
+            drop_gateway("complete_request", true)) ||
+           (gw_fetch_server_error(ret) &&
+            drop_gateway("complete_request", false)))) {
         continue;
       }
       if (ret == -ERR_INTERNAL_ERROR && tries < NUM_ENPOINT_IOERROR_RETRIES - 1) {
@@ -4950,6 +5009,9 @@ int RGWRados::fetch_remote_obj(RGWObjectCtx& dest_obj_ctx,
       goto set_err_state;
     }
     break;
+  }
+  if (via_gateway) {
+    svc.zone->note_gateway_success(source_zone);
   }
   ret = cb.flush();
   if (ret < 0) {

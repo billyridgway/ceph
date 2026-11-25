@@ -130,6 +130,36 @@ options:
   services:
   - rgw
   with_legacy: true
+- name: rgw_gateway_fallback_direct
+  type: bool
+  level: advanced
+  desc: Fall back to the direct zone connection when a multisite fetch
+    through the local long-haul gateway fails
+  long_desc: When a zone routes remote fetches through a local gateway
+    (gateway_config in the period), a transport-class gateway failure
+    retries the fetch on the direct zone connection. Set to false to
+    make the gateway mandatory, so gateway failures surface as fetch
+    failures instead. Application-level answers from the source zone
+    (for example, object not found) never fall back either way.
+  default: true
+  services:
+  - rgw
+  with_legacy: true
+- name: rgw_gateway_failure_backoff_secs
+  type: int
+  level: advanced
+  desc: Seconds to skip the local gateway for a source zone after a
+    transport-class gateway failure
+  long_desc: After a fetch through the local gateway fails with a
+    transport error, fetches for that source zone use the direct zone
+    connection for this many seconds before the gateway is tried
+    again, so a dead gateway does not add a failed attempt to every
+    object fetch. A successful gateway fetch clears the backoff.
+  default: 30
+  min: 0
+  services:
+  - rgw
+  with_legacy: true
 - name: rgw_put_obj_min_window_size
   type: size
   level: advanced

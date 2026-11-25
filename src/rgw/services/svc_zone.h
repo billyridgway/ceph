@@ -4,7 +4,9 @@
 #pragma once
 
 #include "driver/rados/rgw_service.h"
+#include "common/ceph_time.h"
 #include <memory>
+#include <mutex>
 
 
 class RGWSI_SysObj;
@@ -49,6 +51,16 @@ class RGWSI_Zone : public RGWServiceInstance
 
   RGWRESTConn *rest_master_conn{nullptr};
   std::map<rgw_zone_id, RGWRESTConn *> zone_conn_map;
+  /* Long-haul gateway connections, one per remote zone, built only
+   * when the local zone has a gateway configured (see
+   * RGWZoneGatewayConfig). Each is addressed to the LOCAL gateway's
+   * endpoints and carries the remote zone's identity, mirroring
+   * zone_conn_map; the gateway pair owns the WAN leg. */
+  std::map<rgw_zone_id, RGWRESTConn *> gateway_conn_map;
+  /* Per-source-zone gateway backoff: fetches skip the gateway until
+   * this time after a transport-class failure. */
+  std::map<rgw_zone_id, ceph::real_time> gateway_unhealthy_until;
+  std::mutex gateway_health_lock;
   std::vector<const RGWZone*> data_sync_source_zones;
   std::map<rgw_zone_id, RGWRESTConn *> zone_data_notify_to_map;
   std::map<std::string, RGWRESTConn *> zonegroup_conn_map;
@@ -122,6 +134,10 @@ public:
   RGWZone* find_zone(const rgw_zone_id& id);
 
   RGWRESTConn *get_zone_conn(const rgw_zone_id& zone_id);
+  RGWRESTConn *get_gateway_conn(const rgw_zone_id& zone_id);
+  bool gateway_conn_usable(const rgw_zone_id& zone_id);
+  void note_gateway_failure(const rgw_zone_id& zone_id, int backoff_secs);
+  void note_gateway_success(const rgw_zone_id& zone_id);
   RGWRESTConn *get_zone_conn_by_name(const std::string& name);
   bool find_zone_id_by_name(const std::string& name, rgw_zone_id *id);
 

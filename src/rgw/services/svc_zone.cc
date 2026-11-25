@@ -363,6 +363,22 @@ int RGWSI_Zone::do_start(optional_yield y, const DoutPrefixProvider *dpp)
     ldpp_dout(dpp, 0) << "WARNING: could not find zone config in zonegroup for local zone (" << zone_id() << "), will use defaults" << dendl;
   }
 
+  /* If this zone routes remote fetches through a local long-haul
+   * gateway, prepare one gateway connection per remote zone, in
+   * parallel with the direct zone connections above. The gateway
+   * endpoints are this zone's own (local) ones; the connection's zone
+   * id identifies the destination to the gateway. */
+  bool local_gateway = false;
+  std::list<std::string> local_gateway_endpoints;
+  if (auto local_iter = zonegroup->zones.find(zone_id());
+      local_iter != zonegroup->zones.end()) {
+    const RGWZoneGatewayConfig& gw = local_iter->second.gateway_config;
+    if (gw.enabled && !gw.endpoints.empty()) {
+      local_gateway = true;
+      local_gateway_endpoints = gw.endpoints;
+    }
+  }
+
   for (const auto& ziter : zonegroup->zones) {
     const rgw_zone_id& id = ziter.first;
     const RGWZone& z = ziter.second;
@@ -376,6 +392,12 @@ int RGWSI_Zone::do_start(optional_yield y, const DoutPrefixProvider *dpp)
     ldpp_dout(dpp, 20) << "generating connection object for zone " << z.name << " id " << z.id << dendl;
     RGWRESTConn *conn = new RGWRESTConn(cct, z.id, z.endpoints, zone_params->system_key, zonegroup->get_id(), zonegroup->api_name);
     zone_conn_map[id] = conn;
+
+    if (local_gateway) {
+      ldpp_dout(dpp, 20) << "generating gateway connection object for zone " << z.name << " id " << z.id << dendl;
+      RGWRESTConn *gw_conn = new RGWRESTConn(cct, z.id, local_gateway_endpoints, zone_params->system_key, zonegroup->get_id(), zonegroup->api_name);
+      gateway_conn_map[id] = gw_conn;
+    }
 
     bool zone_is_source = source_zones.find(z.id) != source_zones.end();
     bool zone_is_target = target_zones.find(z.id) != target_zones.end();
@@ -415,6 +437,13 @@ void RGWSI_Zone::shutdown()
     auto conn = item.second;
     delete conn;
   }
+  zone_conn_map.clear();
+
+  for (auto& item : gateway_conn_map) {
+    auto conn = item.second;
+    delete conn;
+  }
+  gateway_conn_map.clear();
 
   for (auto& item : zonegroup_conn_map) {
     auto conn = item.second;
@@ -676,6 +705,32 @@ RGWRESTConn *RGWSI_Zone::get_zone_conn(const rgw_zone_id& zone_id) {
   }
 
   return citer->second;
+}
+
+RGWRESTConn *RGWSI_Zone::get_gateway_conn(const rgw_zone_id& zone_id) {
+  auto iter = gateway_conn_map.find(zone_id);
+  if (iter == gateway_conn_map.end()) {
+    return nullptr;
+  }
+  return iter->second;
+}
+
+bool RGWSI_Zone::gateway_conn_usable(const rgw_zone_id& zone_id) {
+  std::lock_guard<std::mutex> lock(gateway_health_lock);
+  auto iter = gateway_unhealthy_until.find(zone_id);
+  return iter == gateway_unhealthy_until.end() ||
+         ceph::real_clock::now() >= iter->second;
+}
+
+void RGWSI_Zone::note_gateway_failure(const rgw_zone_id& zone_id, int backoff_secs) {
+  std::lock_guard<std::mutex> lock(gateway_health_lock);
+  gateway_unhealthy_until[zone_id] =
+      ceph::real_clock::now() + std::chrono::seconds(std::max(backoff_secs, 0));
+}
+
+void RGWSI_Zone::note_gateway_success(const rgw_zone_id& zone_id) {
+  std::lock_guard<std::mutex> lock(gateway_health_lock);
+  gateway_unhealthy_until.erase(zone_id);
 }
 
 RGWRESTConn *RGWSI_Zone::get_zone_conn_by_name(const string& name) {
