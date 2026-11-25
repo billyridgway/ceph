@@ -4384,7 +4384,8 @@ int RGWRados::reindex_obj(rgw::sal::Driver* driver,
   RGWRados::Bucket::UpdateIndex update_idx(&bkt, head_obj);
 
   // Preserve the object category
-  const RGWObjCategory category = (head_manifest && head_manifest->is_tier_type_s3()) ?
+  const RGWObjCategory category = (head_manifest && (head_manifest->is_tier_type_s3() ||
+                                                      head_manifest->is_tier_type_peer_zone())) ?
 				  RGWObjCategory::CloudTiered : RGWObjCategory::Main;
 
   // note: we can skip calling prepare() since there's no transaction
@@ -12531,7 +12532,8 @@ int RGWRados::check_disk_state(const DoutPrefixProvider *dpp,
   list_state.meta.mtime = object.meta.mtime;
   // Preserve the cloud-tiered category when reconciling the index entry from
   // the head object.
-  list_state.meta.category = (manifest && manifest->is_tier_type_s3()) ?
+  list_state.meta.category = (manifest && (manifest->is_tier_type_s3() ||
+                                           manifest->is_tier_type_peer_zone())) ?
 			     RGWObjCategory::CloudTiered : main_category;
   list_state.meta.etag = etag;
   list_state.meta.appendable = appendable;

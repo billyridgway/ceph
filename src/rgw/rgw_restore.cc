@@ -524,7 +524,7 @@ int Restore::process_restore_entry(RestoreEntry& entry, optional_yield y)
                          " storage class " << target_placement.storage_class << dendl;
   }
 
-  if (!tier->is_tier_type_s3()) {
+  if (!tier->is_tier_type_s3() && !tier->is_tier_type_peer_zone()) {
     ldpp_dout(this, -1) << __PRETTY_FUNCTION__ << ": ERROR: not s3 tier type - "
 	   		<< tier->get_tier_type() << 	  
                       " for storage class " << target_placement.storage_class << dendl;
@@ -757,8 +757,11 @@ int Restore::restore_obj_from_cloud(rgw::sal::Bucket* pbucket,
   }
 
   // For cloud-s3 tier (not glacier), wake the restore worker immediately
-  // to start the download instead of waiting for the next periodic cycle
-  if (tier && tier->get_tier_type() == "cloud-s3") {
+  // to start the download instead of waiting for the next periodic cycle.
+  // Peer-zone tiers are likewise fast S3 endpoints (the peer zone's
+  // gateway), so they take the same immediate path.
+  if (tier && (tier->get_tier_type() == "cloud-s3" ||
+               tier->is_tier_type_peer_zone())) {
     ldpp_dout(this, 10) << __PRETTY_FUNCTION__ << ": Waking restore worker for immediate processing (cloud-s3 tier)" << dendl;
     wake_worker();
   }
