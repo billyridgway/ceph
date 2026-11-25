@@ -492,23 +492,18 @@ public:
       return (tier_type == RGWTierType::CLOUD_S3_GLACIER);
   }
 
-  bool is_tier_type_peer_zone() {
-      return (tier_type == RGWTierType::PEER_ZONE);
-  }
-
   inline void set_tier_type(std::string value) {
-      /* Only the tier types in RGWTierType::is_tier_type_supported
-       * (cloud-s3, cloud-s3-glacier, peer-zone) may be recorded. */
+      /* Only RGWTierType::CLOUD_S3 & RGWTierType::CLOUD_S3_GLACIER
+       * tier-type are supported for now */
       if (RGWTierType::is_tier_type_supported(value)) {
         tier_type = value;
       }
   }
 
   inline void set_tier_config(RGWObjTier t) {
-      /* Set only if tier_type is one of the remote tier types whose
-       * config the manifest carries (cloud-s3, cloud-s3-glacier,
-       * peer-zone). */
-      if (!is_tier_type_s3() && !is_tier_type_peer_zone())
+      /* Set only if tier_type set to RGWTierType::CLOUD_S3 or
+       * RGWTierType::CLOUD_S3_GLACIER */
+      if (!is_tier_type_s3())
         return;
 
       tier_config.name = t.name;
@@ -517,7 +512,7 @@ public:
   }
 
   inline const void get_tier_config(RGWObjTier* t) {
-      if (!is_tier_type_s3() && !is_tier_type_peer_zone())
+      if (!is_tier_type_s3())
         return;
 
       t->name = tier_config.name;

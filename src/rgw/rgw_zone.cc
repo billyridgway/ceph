@@ -581,9 +581,6 @@ void RGWZoneGroupPlacementTier::decode_json(JSONObj *obj)
   if (is_tier_type_s3_glacier()) {
     JSONDecoder::decode_json("s3-glacier", s3_glacier, obj);
   }
-  if (is_tier_type_peer_zone()) {
-    JSONDecoder::decode_json("peer_zone", peer_zone, obj);
-  }
 }
 
 void RGWZoneStorageClasses::dump(Formatter *f) const
@@ -657,10 +654,6 @@ void RGWZoneGroupPlacementTier::dump(Formatter *f) const
 
   if (is_tier_type_s3_glacier()) {
     encode_json("s3-glacier", s3_glacier, f);
-  }
-
-  if (is_tier_type_peer_zone()) {
-    encode_json("peer_zone", peer_zone, f);
   }
 }
 
@@ -2149,13 +2142,6 @@ int RGWZoneGroupPlacementTier::update_params(const JSONFormattable& config)
   if (is_tier_type_s3_glacier()) {
     r = s3_glacier.update_params(config);
   }
-
-  if (is_tier_type_peer_zone()) {
-    if (config.exists("peer_zone")) {
-      peer_zone = config["peer_zone"];
-    }
-    r = 0;
-  }
   return r;
 }
 
@@ -2185,10 +2171,6 @@ int RGWZoneGroupPlacementTier::clear_params(const JSONFormattable& config)
 
   if (is_tier_type_s3_glacier()) {
     s3_glacier.clear_params(config);
-  }
-
-  if (config.exists("peer_zone")) {
-    peer_zone.clear();
   }
 
   return 0;

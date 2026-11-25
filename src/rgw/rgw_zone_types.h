@@ -656,11 +656,9 @@ WRITE_CLASS_ENCODER(RGWZoneGroupTierS3Glacier)
 struct RGWTierType {
   static constexpr const char* CLOUD_S3 = "cloud-s3";
   static constexpr const char* CLOUD_S3_GLACIER = "cloud-s3-glacier";
-  static constexpr const char* PEER_ZONE = "peer-zone";
-
+ 
   static bool is_tier_type_supported(const std::string& t) {
-    return ((t == CLOUD_S3) || (t == CLOUD_S3_GLACIER) ||
-            (t == PEER_ZONE));
+    return ((t == CLOUD_S3) || (t == CLOUD_S3_GLACIER));
   }
 };
 
@@ -680,19 +678,13 @@ struct RGWZoneGroupPlacementTier {
   uint64_t read_through_restore_days = 1;
   std::string restore_storage_class = RGW_STORAGE_CLASS_STANDARD;
 
-  /* For tier_type == PEER_ZONE: id of the zone (in this realm) that
-   * holds the tiered data. Transitions and reads reach it through that
-   * zone's gateway endpoint when its gateway config is enabled, else
-   * through the zone's own endpoint, using the multisite system key. */
-  std::string peer_zone;
-
   RGWZoneGroupTierS3Glacier s3_glacier;
 
   int update_params(const JSONFormattable& config);
   int clear_params(const JSONFormattable& config);
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(6, 1, bl);
+    ENCODE_START(5, 1, bl);
     encode(tier_type, bl);
     encode(storage_class, bl);
     encode(retain_head_object, bl);
@@ -706,12 +698,11 @@ struct RGWZoneGroupPlacementTier {
       encode(s3_glacier, bl);
     }
     encode(retain_current_version, bl);
-    encode(peer_zone, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(6, bl);
+    DECODE_START(5, bl);
     decode(tier_type, bl);
     decode(storage_class, bl);
     decode(retain_head_object, bl);
@@ -741,19 +732,12 @@ struct RGWZoneGroupPlacementTier {
     if (struct_v >= 5) {
       decode(retain_current_version, bl);
     }
-    if (struct_v >= 6) {
-      decode(peer_zone, bl);
-    }
     DECODE_FINISH(bl);
   }
 
   bool is_tier_type_s3() const {
     return (tier_type ==  RGWTierType::CLOUD_S3 ||
             tier_type == RGWTierType::CLOUD_S3_GLACIER);
-  }
-
-  bool is_tier_type_peer_zone() const {
-    return (tier_type == RGWTierType::PEER_ZONE);
   }
 
   bool is_tier_type_s3_glacier() const {

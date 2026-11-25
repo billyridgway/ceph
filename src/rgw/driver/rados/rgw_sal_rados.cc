@@ -3464,74 +3464,6 @@ int RadosObject::transition(Bucket* bucket,
                                            mtime, olh_epoch, dpp, y, flags & FLAG_LOG_OP);
 }
 
-/* Resolve how to reach a peer-zone tier target (tier_type "peer-zone",
- * doc/rgw/rgw-rdma-gateway.md phase 4d): the peer zone's gateway
- * endpoint when its gateway config is enabled, so transitions and reads
- * ride the gateway transport, else the peer zone's own endpoint. The
- * multisite system key signs the requests, as with data sync, and the
- * peer's zonegroup id scopes the signature. */
-static int peer_zone_tier_target(const DoutPrefixProvider *dpp,
-                                 rgw::sal::RadosStore *store,
-                                 const RGWZoneGroupPlacementTier& rt,
-                                 std::string& endpoint,
-                                 RGWAccessKey& key,
-                                 std::string& zonegroup_id)
-{
-  RGWServices *svc = store->svc();
-  const RGWZone *peer = svc->zone->find_zone(rt.peer_zone);
-  std::string peer_zonegroup;
-  if (!peer) {
-    /* find_zone only indexes the local zonegroup's zones; a peer-zone
-     * tier target normally lives in another zonegroup of the realm, so
-     * fall back to scanning the current period, which also yields the
-     * peer's zonegroup id for the signature scope below. */
-    const RGWPeriod& period = svc->zone->get_current_period();
-    for (auto& zg_iter : period.period_map.zonegroups) {
-      auto ziter = zg_iter.second.zones.find(rt.peer_zone);
-      if (ziter != zg_iter.second.zones.end()) {
-        peer = &ziter->second;
-        peer_zonegroup = zg_iter.first;
-        break;
-      }
-    }
-  }
-  if (!peer) {
-    ldpp_dout(dpp, 0) << "ERROR: peer-zone tier target zone (" << rt.peer_zone
-                      << ") not found" << dendl;
-    return -EINVAL;
-  }
-  if (peer->gateway_config.enabled &&
-      !peer->gateway_config.endpoints.empty()) {
-    endpoint = peer->gateway_config.endpoints.front();
-  } else if (!peer->endpoints.empty()) {
-    endpoint = peer->endpoints.front();
-  } else {
-    ldpp_dout(dpp, 0) << "ERROR: peer-zone tier target zone (" << rt.peer_zone
-                      << ") has no endpoint" << dendl;
-    return -EINVAL;
-  }
-  key = svc->zone->get_zone_params().system_key;
-
-  zonegroup_id = peer_zonegroup;
-  if (zonegroup_id.empty()) {
-    std::list<std::string> zg_ids;
-    if (svc->zone->list_zonegroups(dpp, zg_ids) == 0) {
-      for (auto& zg_id : zg_ids) {
-        RGWZoneGroup zg;
-        if (svc->zone->get_zonegroup(zg_id, zg) == 0 &&
-            zg.zones.find(peer->id) != zg.zones.end()) {
-          zonegroup_id = zg_id;
-          break;
-        }
-      }
-    }
-  }
-  if (zonegroup_id.empty()) {
-    zonegroup_id = store->get_zone()->get_zonegroup().get_id();
-  }
-  return 0;
-}
-
 int RadosObject::restore_obj_from_cloud(Bucket* bucket,
                                   rgw::sal::PlacementTier* tier,
                           	  CephContext* cct,
@@ -3544,13 +3476,10 @@ int RadosObject::restore_obj_from_cloud(Bucket* bucket,
   /* init */
   rgw::sal::RadosPlacementTier* rtier = static_cast<rgw::sal::RadosPlacementTier*>(tier);
   string id = "cloudid";
-  string endpoint;
-  RGWAccessKey key;
-  string region;
-  HostStyle host_style = PathStyle;
-  string conn_zonegroup;
-  string target_storage_class;
-  bool target_by_bucket = false;
+  string endpoint = rtier->get_rt().t.s3.endpoint;
+  RGWAccessKey key = rtier->get_rt().t.s3.key;
+  string region = rtier->get_rt().t.s3.region;
+  HostStyle host_style = rtier->get_rt().t.s3.host_style;
   const rgw::sal::ZoneGroup& zonegroup = store->get_zone()->get_zonegroup();
   // extract owner (user_id or account_id depending on ownership type)
   std::string owner;
@@ -3559,42 +3488,11 @@ int RadosObject::restore_obj_from_cloud(Bucket* bucket,
   } else if (const auto* user = std::get_if<rgw_user>(&bucket->get_owner()); user) {
     owner = user->id;
   }
-  string bucket_name;
+  string bucket_name = rtier->get_rt().t.s3.make_target_bucket_name(
+      zonegroup.get_name(),
+      tier->get_storage_class(), bucket->get_name(),
+      bucket->get_tenant(), owner);
   int ret = 0;
-  if (rtier->get_rt().is_tier_type_peer_zone()) {
-    /* The peer zone hosts the same bucket name; data moves over the
-     * peer's gateway transport when enabled (phase 4d). */
-    ret = peer_zone_tier_target(dpp, store, rtier->get_rt(),
-                                endpoint, key, conn_zonegroup);
-    if (ret < 0) {
-      return ret;
-    }
-    region = conn_zonegroup;
-    /* Bucket names are realm-global in RGW, so the peer cannot host a
-     * bucket with the source bucket's name; use the same derived target
-     * name the cloud tiers use (unique per source bucket). */
-    bucket_name = rtier->get_rt().t.s3.make_target_bucket_name(
-        zonegroup.get_name(),
-        tier->get_storage_class(), bucket->get_name(),
-        bucket->get_tenant(), owner);
-    target_storage_class = RGW_STORAGE_CLASS_STANDARD;
-    /* The peer hosts real buckets: use the per-bucket target naming so
-     * the object keeps its own key (the shared-bucket cloud convention
-     * would prefix the key with the source bucket name). */
-    target_by_bucket = true;
-  } else {
-    endpoint = rtier->get_rt().t.s3.endpoint;
-    key = rtier->get_rt().t.s3.key;
-    region = rtier->get_rt().t.s3.region;
-    host_style = rtier->get_rt().t.s3.host_style;
-    conn_zonegroup = zonegroup.get_id();
-    bucket_name = rtier->get_rt().t.s3.make_target_bucket_name(
-        zonegroup.get_name(),
-        tier->get_storage_class(), bucket->get_name(),
-        bucket->get_tenant(), owner);
-    target_storage_class = rtier->get_rt().t.s3.target_storage_class;
-    target_by_bucket = rtier->get_rt().t.s3.target_by_bucket;
-  }
 
   auto& attrs = get_attrs();
   RGWObjTier tier_config;
@@ -3626,13 +3524,13 @@ int RadosObject::restore_obj_from_cloud(Bucket* bucket,
   }
 
   /* Create RGW REST connection */
-  S3RESTConn conn(cct, id, { endpoint }, key, conn_zonegroup, region, host_style);
+  S3RESTConn conn(cct, id, { endpoint }, key, zonegroup.get_id(), region, host_style);
 
   // save source cloudtier storage class
   RGWLCCloudTierCtx tier_ctx(cct, dpp, ent, store, bucket->get_info(),
            this, conn, bucket_name,
-           target_storage_class,
-           target_by_bucket, y);
+           rtier->get_rt().t.s3.target_storage_class,
+           rtier->get_rt().t.s3.target_by_bucket, y);
   tier_ctx.acl_mappings = rtier->get_rt().t.s3.acl_mappings;
   tier_ctx.multipart_min_part_size = rtier->get_rt().t.s3.multipart_min_part_size;
   tier_ctx.multipart_sync_threshold = rtier->get_rt().t.s3.multipart_sync_threshold;
@@ -3691,13 +3589,10 @@ int RadosObject::transition_to_cloud(Bucket* bucket,
   /* init */
   rgw::sal::RadosPlacementTier* rtier = static_cast<rgw::sal::RadosPlacementTier*>(tier);
   string id = "cloudid";
-  string endpoint;
-  RGWAccessKey key;
-  string region;
-  HostStyle host_style = PathStyle;
-  string conn_zonegroup;
-  string target_storage_class;
-  bool target_by_bucket = false;
+  string endpoint = rtier->get_rt().t.s3.endpoint;
+  RGWAccessKey key = rtier->get_rt().t.s3.key;
+  string region = rtier->get_rt().t.s3.region;
+  HostStyle host_style = rtier->get_rt().t.s3.host_style;
   const rgw::sal::ZoneGroup& zonegroup = store->get_zone()->get_zonegroup();
   // extract owner (user_id or account_id depending on ownership type)
   std::string owner;
@@ -3706,50 +3601,18 @@ int RadosObject::transition_to_cloud(Bucket* bucket,
   } else if (const auto* user = std::get_if<rgw_user>(&bucket->get_owner()); user) {
     owner = user->id;
   }
-  string bucket_name;
-  if (rtier->get_rt().is_tier_type_peer_zone()) {
-    /* The peer zone hosts the same bucket name; data moves over the
-     * peer's gateway transport when enabled (phase 4d). */
-    int pret = peer_zone_tier_target(dpp, store, rtier->get_rt(),
-                                     endpoint, key, conn_zonegroup);
-    if (pret < 0) {
-      return pret;
-    }
-    region = conn_zonegroup;
-    /* Bucket names are realm-global in RGW, so the peer cannot host a
-     * bucket with the source bucket's name; use the same derived target
-     * name the cloud tiers use (unique per source bucket). */
-    bucket_name = rtier->get_rt().t.s3.make_target_bucket_name(
-        zonegroup.get_name(),
-        tier->get_storage_class(), bucket->get_name(),
-        bucket->get_tenant(), owner);
-    target_storage_class = RGW_STORAGE_CLASS_STANDARD;
-    /* The peer hosts real buckets: use the per-bucket target naming so
-     * the object keeps its own key (the shared-bucket cloud convention
-     * would prefix the key with the source bucket name). */
-    target_by_bucket = true;
-  } else {
-    endpoint = rtier->get_rt().t.s3.endpoint;
-    key = rtier->get_rt().t.s3.key;
-    region = rtier->get_rt().t.s3.region;
-    host_style = rtier->get_rt().t.s3.host_style;
-    conn_zonegroup = zonegroup.get_id();
-    bucket_name = rtier->get_rt().t.s3.make_target_bucket_name(
-        zonegroup.get_name(),
-        tier->get_storage_class(), bucket->get_name(),
-        bucket->get_tenant(), owner);
-    target_storage_class = rtier->get_rt().t.s3.target_storage_class;
-    target_by_bucket = rtier->get_rt().t.s3.target_by_bucket;
-  }
+  string bucket_name = rtier->get_rt().t.s3.make_target_bucket_name(
+      zonegroup.get_name(),
+      tier->get_storage_class(), bucket->get_name(),
+      bucket->get_tenant(), owner);
 
   /* Create RGW REST connection */
-  S3RESTConn conn(cct, id, { endpoint }, key, conn_zonegroup, region, host_style);
+  S3RESTConn conn(cct, id, { endpoint }, key, zonegroup.get_id(), region, host_style);
 
   RGWLCCloudTierCtx tier_ctx(cct, dpp, o, store, bucket->get_info(),
 			     this, conn, bucket_name,
-			     target_storage_class,
-			     target_by_bucket, y);
-  tier_ctx.tier_type = rtier->get_rt().tier_type;
+			     rtier->get_rt().t.s3.target_storage_class,
+			     rtier->get_rt().t.s3.target_by_bucket, y);
   tier_ctx.acl_mappings = rtier->get_rt().t.s3.acl_mappings;
   tier_ctx.multipart_min_part_size = rtier->get_rt().t.s3.multipart_min_part_size;
   tier_ctx.multipart_sync_threshold = rtier->get_rt().t.s3.multipart_sync_threshold;

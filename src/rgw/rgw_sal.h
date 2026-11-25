@@ -1880,8 +1880,6 @@ public:
   virtual const std::string& get_tier_type() = 0;
   /** Is the type of this tier cloud-s3/cloud-s3-glacier */
   virtual bool is_tier_type_s3() = 0;
-  /** Is the type of this tier peer-zone */
-  virtual bool is_tier_type_peer_zone() { return false; }
   /** Get the storage class of this tier */
   virtual const std::string& get_storage_class() = 0;
   /** Should we retain the head object when transitioning */

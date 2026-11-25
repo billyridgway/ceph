@@ -1707,8 +1707,7 @@ public:
 
     r = zonegroup.get_placement_tier(target_placement, &oc.tier);
 
-    if (!r && (oc.tier->is_tier_type_s3() ||
-               oc.tier->is_tier_type_peer_zone())) {
+    if (!r && oc.tier->is_tier_type_s3()) {
       ldpp_dout(oc.dpp, 30) << "Found cloud s3 tier: " << target_placement.storage_class << dendl;
       /* Skip objects which have an active retention or legal hold, current
        * versions included: with retain_head_object and retain_current_version

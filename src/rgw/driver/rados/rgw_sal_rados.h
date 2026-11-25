@@ -44,7 +44,6 @@ public:
 
   virtual const std::string& get_tier_type() { return tier.tier_type; }
   virtual bool is_tier_type_s3() { return (tier.is_tier_type_s3()); }
-  virtual bool is_tier_type_peer_zone() { return (tier.is_tier_type_peer_zone()); }
   virtual const std::string& get_storage_class() { return tier.storage_class; }
   virtual bool retain_head_object() { return tier.retain_head_object; }
   virtual bool retain_current_version() { return tier.retain_current_version; }
