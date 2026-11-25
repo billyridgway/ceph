@@ -474,13 +474,8 @@ void usage()
   cout << "   --sync-from-all[=false]           set/reset whether zone syncs from all zonegroup peers\n";
   cout << "   --sync-from=[zone-name][,...]     set list of zones to sync from\n";
   cout << "   --sync-from-rm=[zone-name][,...]  remove zones from list of zones to sync from\n";
-  cout << "   --gateway-enabled[=false]         enable the zone gateway data plane (doc/rgw/rgw-rdma-gateway.md)\n";
-  cout << "   --gateway-endpoints=[ep][,...]    set the zone's gateway daemon endpoints\n";
-  cout << "   --gateway-transport=<type>        gateway transport: http, udp, rdma or auto\n";
-  cout << "   --gateway-port=<port>             gateway UDP listen port\n";
-  cout << "   --gateway-chunk-size=<bytes>      gateway fetch/cache chunk size in bytes\n";
-  cout << "   --gateway-qos-sync-bps=<bps>      gateway rate cap for sync/tiering traffic (0 = unlimited)\n";
-  cout << "   --gateway-qos-read-bps=<bps>      gateway rate cap for read-through traffic (0 = unlimited)\n";
+  cout << "   --gateway-enabled[=false]         route this zone's remote fetches through its local gateway\n";
+  cout << "   --gateway-endpoints=[ep][,...]    set the zone's local gateway endpoints\n";
   cout << "   --bucket-index-max-shards         override a zone/zonegroup's default bucket index shard count\n";
   cout << "   --fix                             besides checking bucket index, will also fix it\n";
   cout << "   --check-objects                   bucket check: rebuilds bucket index according to actual objects state\n";
@@ -3388,26 +3383,15 @@ static vector<rgw_zone_id> zone_ids_from_str(const string& val)
 struct GatewayOptions {
   std::optional<bool> enabled;
   std::optional<std::list<std::string>> endpoints;
-  std::optional<std::string> transport;
-  std::optional<int> port;
-  std::optional<unsigned long long> chunk_size;
-  std::optional<unsigned long long> qos_sync_bps;
-  std::optional<unsigned long long> qos_read_bps;
 
   bool any() const {
-    return enabled || endpoints || transport || port || chunk_size ||
-           qos_sync_bps || qos_read_bps;
+    return enabled || endpoints;
   }
 
   RGWZoneGatewayConfig merge(const RGWZoneGatewayConfig& base) const {
     RGWZoneGatewayConfig config = base;
     if (enabled) config.enabled = *enabled;
     if (endpoints) config.endpoints = *endpoints;
-    if (transport) config.transport = *transport;
-    if (port) config.port = *port;
-    if (chunk_size) config.chunk_size = *chunk_size;
-    if (qos_sync_bps) config.qos_sync_bps = *qos_sync_bps;
-    if (qos_read_bps) config.qos_read_bps = *qos_read_bps;
     return config;
   }
 };
@@ -4216,41 +4200,6 @@ int main(int argc, const char **argv)
       std::list<std::string> gw_eps;
       get_str_list(val, gw_eps);
       gateway_opts.endpoints = gw_eps;
-    } else if (ceph_argparse_witharg(args, i, &val, "--gateway-transport", (char*)NULL)) {
-      if (val != "http" && val != "udp" && val != "rdma" && val != "auto") {
-        cerr << "ERROR: invalid gateway transport: " << val
-             << " (expected http, udp, rdma or auto)" << std::endl;
-        return EINVAL;
-      }
-      gateway_opts.transport = val;
-    } else if (ceph_argparse_witharg(args, i, &val, "--gateway-port", (char*)NULL)) {
-      int gw_port = (int)strict_strtol(val.c_str(), 10, &err);
-      if (!err.empty() || gw_port < 1 || gw_port > 65535) {
-        cerr << "ERROR: failed to parse gateway port: " << val << std::endl;
-        return EINVAL;
-      }
-      gateway_opts.port = gw_port;
-    } else if (ceph_argparse_witharg(args, i, &val, "--gateway-chunk-size", (char*)NULL)) {
-      unsigned long long gw_chunk = strict_strtoull(val.c_str(), 10, &err);
-      if (!err.empty() || gw_chunk == 0) {
-        cerr << "ERROR: failed to parse gateway chunk size: " << val << std::endl;
-        return EINVAL;
-      }
-      gateway_opts.chunk_size = gw_chunk;
-    } else if (ceph_argparse_witharg(args, i, &val, "--gateway-qos-sync-bps", (char*)NULL)) {
-      unsigned long long gw_bps = strict_strtoull(val.c_str(), 10, &err);
-      if (!err.empty()) {
-        cerr << "ERROR: failed to parse gateway qos sync bps: " << val << std::endl;
-        return EINVAL;
-      }
-      gateway_opts.qos_sync_bps = gw_bps;
-    } else if (ceph_argparse_witharg(args, i, &val, "--gateway-qos-read-bps", (char*)NULL)) {
-      unsigned long long gw_bps = strict_strtoull(val.c_str(), 10, &err);
-      if (!err.empty()) {
-        cerr << "ERROR: failed to parse gateway qos read bps: " << val << std::endl;
-        return EINVAL;
-      }
-      gateway_opts.qos_read_bps = gw_bps;
     } else if (ceph_argparse_binary_flag(args, i, &tmp_int, NULL, "--sync-from-all", (char*)NULL)) {
       sync_from_all = (bool)tmp_int;
       sync_from_all_specified = true;

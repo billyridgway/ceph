@@ -740,11 +740,6 @@ void RGWZoneGatewayConfig::dump(Formatter *f) const
 {
   encode_json("enabled", enabled, f);
   encode_json("endpoints", endpoints, f);
-  encode_json("transport", transport, f);
-  encode_json("port", port, f);
-  encode_json("chunk_size", chunk_size, f);
-  encode_json("qos_sync_bps", qos_sync_bps, f);
-  encode_json("qos_read_bps", qos_read_bps, f);
 }
 
 list<RGWZoneGatewayConfig> RGWZoneGatewayConfig::generate_test_instances()
@@ -754,7 +749,6 @@ list<RGWZoneGatewayConfig> RGWZoneGatewayConfig::generate_test_instances()
   o.emplace_back();
   o.back().enabled = true;
   o.back().endpoints = {"127.0.0.1:19112"};
-  o.back().transport = "udp";
   return o;
 }
 
@@ -762,11 +756,9 @@ void RGWZoneGatewayConfig::decode_json(JSONObj *obj)
 {
   JSONDecoder::decode_json("enabled", enabled, obj);
   JSONDecoder::decode_json("endpoints", endpoints, obj);
-  JSONDecoder::decode_json("transport", transport, obj);
-  JSONDecoder::decode_json("port", port, obj);
-  JSONDecoder::decode_json("chunk_size", chunk_size, obj);
-  JSONDecoder::decode_json("qos_sync_bps", qos_sync_bps, obj);
-  JSONDecoder::decode_json("qos_read_bps", qos_read_bps, obj);
+  // Periods written before the config was minimized may also carry
+  // transport/port/chunk_size/qos_* keys; they belong to the gateway
+  // service's own configuration now and are ignored here.
 }
 
 void RGWZoneStorageClass::dump(Formatter *f) const

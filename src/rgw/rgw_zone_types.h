@@ -313,42 +313,42 @@ struct RGWZonePlacementInfo {
 };
 WRITE_CLASS_ENCODER(RGWZonePlacementInfo)
 
-/// Configuration for a zone's gateway data plane (see
-/// doc/rgw/rgw-rdma-gateway.md): a paired-gateway read-through cache
-/// and bulk-fetch path between zones. Carried in the period config as
-/// part of RGWZone. The gateway engine itself is a standalone library
-/// (libgwengine) outside the RGW tree; this struct is only its
-/// configuration, and nothing consumes it yet.
+/// Configuration for routing this zone's remote fetches through a
+/// local long-haul gateway (see doc/rgw/rgw-rdma-gateway.md). Carried
+/// in the period config as part of RGWZone. Deliberately minimal: the
+/// gateway is a standalone service and owns all transport-specific
+/// configuration (wire protocol, ports, chunking, QoS); RGW only
+/// needs to know whether to use it and where it listens locally.
 struct RGWZoneGatewayConfig {
   bool enabled{false};
-  std::list<std::string> endpoints; ///< this zone's gateway daemon endpoints
-  std::string transport{"http"};    ///< http | udp | rdma | auto
-  uint32_t port{19112};             ///< gateway UDP listen port
-  uint64_t chunk_size{4 * 1024 * 1024}; ///< fetch/cache chunk size in bytes
-  uint64_t qos_sync_bps{0};         ///< sync/tiering rate cap, 0 = unlimited
-  uint64_t qos_read_bps{0};         ///< read-through rate cap, 0 = unlimited
+  /// Endpoints of THIS zone's local gateway. A fetching RGW connects
+  /// here -- never across the WAN; the gateway pair owns the long-haul
+  /// leg to the source zone's site.
+  std::list<std::string> endpoints;
 
   void encode(bufferlist& bl) const {
-    ENCODE_START(1, 1, bl);
+    ENCODE_START(2, 1, bl);
     encode(enabled, bl);
     encode(endpoints, bl);
-    encode(transport, bl);
-    encode(port, bl);
-    encode(chunk_size, bl);
-    encode(qos_sync_bps, bl);
-    encode(qos_read_bps, bl);
     ENCODE_FINISH(bl);
   }
 
   void decode(bufferlist::const_iterator& bl) {
-    DECODE_START(1, bl);
+    DECODE_START(2, bl);
     decode(enabled, bl);
     decode(endpoints, bl);
-    decode(transport, bl);
-    decode(port, bl);
-    decode(chunk_size, bl);
-    decode(qos_sync_bps, bl);
-    decode(qos_read_bps, bl);
+    if (struct_v == 1) {
+      // v1 carried transport/port/chunk_size/qos fields, since moved
+      // into the gateway service's own configuration. Read and drop.
+      std::string legacy_transport;
+      uint32_t legacy_port;
+      uint64_t legacy_chunk_size, legacy_qos_sync_bps, legacy_qos_read_bps;
+      decode(legacy_transport, bl);
+      decode(legacy_port, bl);
+      decode(legacy_chunk_size, bl);
+      decode(legacy_qos_sync_bps, bl);
+      decode(legacy_qos_read_bps, bl);
+    }
     DECODE_FINISH(bl);
   }
 
